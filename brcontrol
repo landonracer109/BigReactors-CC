@@ -10,7 +10,7 @@
 -- fill up (nothing is using the power), turbines are stood down one at a time, and brought back
 -- when the power is needed again.
 
-local VERSION = "v4"
+local VERSION = "v5"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
@@ -345,9 +345,9 @@ local function controlReactor()
       surplus = surplus + want * 0.02
     end
     -- PI controller in velocity form: react to the change in surplus (P) plus a slow push on the
-    -- surplus itself (I). Gentle enough for a reactor that takes 20+ seconds to respond.
+    -- surplus itself (I). Tuned for the real reactor, which responds within seconds.
     local prev = lastSurplus or surplus
-    local step = clamp((0.5 * (surplus - prev) + 0.05 * CFG.control * surplus) / CFG.steamPerRod, -2, 2)
+    local step = clamp((0.5 * (surplus - prev) + 0.2 * CFG.control * surplus) / CFG.steamPerRod, -2, 2)
     lastSurplus = surplus
     if now < settleUntil then step = 0 end
     local water = R.waterMax > 0 and R.water / R.waterMax or 0
