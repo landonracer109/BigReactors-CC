@@ -39,7 +39,7 @@ before the first start.
 ## Settings
 
 At the top of the file: turbine flow, the RPM where coils switch on and off, buffer levels for
-standing turbines down, update times, text scale and `monitorOrder` (put the monitor names in the
+standing turbines down, update times, text size (`textScale`, 0 = the biggest that fits) and `monitorOrder` (put the monitor names in the
 order you want; each monitor shows its name in the bottom-left corner).
 
 Press **Q** on the computer to stop the program (the rods stay where they are).

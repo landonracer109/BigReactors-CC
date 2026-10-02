@@ -10,7 +10,7 @@
 -- fill up (nothing is using the power), turbines are stood down one at a time, and brought back
 -- when the power is needed again.
 
-local VERSION = "v1"
+local VERSION = "v2"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
@@ -22,7 +22,7 @@ local CFG = {
   steamPerRod   = 3000,  -- roughly how many mB/t of steam 1% of control rod changes (for the controller)
   control       = 2,     -- seconds between control rod adjustments (3 reactor reads each)
   update        = 6,     -- seconds between turbine reads and dashboard redraws (a multiple of control)
-  textScale     = 0.5,
+  textScale     = 0,     -- monitor text size 0.5-5; 0 = the biggest that fits
   monitorOrder  = {},    -- e.g. { "monitor_0", "monitor_1", "monitor_2", "monitor_3" }; empty = by name.
                          -- The first is the overview, the rest show the turbines.
 }
@@ -306,14 +306,14 @@ local lastSurplus = nil
 
 local function controlReactor()
   if not R.ok then controlNote = "Reactor not connected"; return end
-  if not R.cooled then controlNote = "Reactor is passive (no coolant ports): not controlling"; return end
+  if not R.cooled then controlNote = "Passive reactor: not controlling"; return end
   if rods == nil then
     rods = num(try(reactor, "getControlRodLevel", 0))
   end
   if demand <= 0 then
     rods = 100
     lastSurplus = nil
-    controlNote = "No turbines running: rods in"
+    controlNote = "No turbines: rods in"
   else
     -- How much more (+) or less (-) steam the reactor makes than the turbines take, in mB/t.
     local want = math.min(demand, R.steamMax > 0 and R.steamMax or demand)
@@ -335,12 +335,12 @@ local function controlReactor()
     local water = R.waterMax > 0 and R.water / R.waterMax or 0
     if water < 0.05 then
       step = 1
-      controlNote = "OUT OF WATER: rods going in"
+      controlNote = "OUT OF WATER: rods in"
     elseif water < 0.2 and step < 0 then
       step = 0
-      controlNote = "LOW WATER: holding rods"
+      controlNote = "LOW WATER: holding"
     elseif demand > want then
-      controlNote = "Steam limit reached (" .. commas(R.steamMax) .. " mB/t)"
+      controlNote = "At " .. short(R.steamMax) .. " mB/t limit"
     else
       controlNote = surplus < -want * 0.02 and "Raising steam" or
                     surplus > want * 0.02 and "Lowering steam" or "Steady"
@@ -537,7 +537,8 @@ local function drawOverview(cv)
     cvBar(cv, lx + 14, y, inner - 13, R.fuelMax > 0 and R.fuel / R.fuelMax or 0, C.yellow,
       short(R.fuel) .. " mB  " .. pct(R.fuelMax > 0 and R.fuel / R.fuelMax or 0)); y = y + 1
     kv(cv, lx + 1, y, inner, "Waste", commas(R.waste) .. " mB"); y = y + 1
-    kv(cv, lx + 1, y, inner, "Fuel burn", dec(R.burn, 3) .. " mB/t  (" .. dec(R.burn * 1.2, 2) .. " ingots/min)"); y = y + 1
+    kv(cv, lx + 1, y, inner, "Fuel burn", dec(R.burn, 3) .. " mB/t"); y = y + 1
+    kv(cv, lx + 1, y, inner, "Ingots per minute", dec(R.burn * 1.2, 2)); y = y + 1
     kv(cv, lx + 1, y, inner, "Reactivity", string.format("%d%%", math.floor(R.reactivity + 0.5)))
   end
 
@@ -545,9 +546,9 @@ local function drawOverview(cv)
   panel(cv, rx, 3, half, 21, "POWER")
   local bigRF = commas(round(totals.rf or 0, 100))
   cvBig(cv, rx + 2, 5, bigRF, C.lime)
-  cvWrite(cv, rx + 2 + 4 * #bigRF, 9, "RF/t", C.lime)
+  cvWrite(cv, rx + 2, 10, "RF/t", C.lime)
   y = 12
-  kv(cv, rx + 1, y, inner, "Turbines", string.format("%d running, %d standby, %d offline",
+  kv(cv, rx + 1, y, inner, "Turbines", string.format("%d on / %d standby / %d off",
     totals.running or 0, totals.standby or 0, totals.offline or 0)); y = y + 1
   kv(cv, rx + 1, y, inner, "Steam used", commas(totals.flow or 0) .. " mB/t"); y = y + 1
   kv(cv, rx + 1, y, inner, "Average RPM", commas(round(totals.rpm or 0, 10))); y = y + 1
@@ -567,7 +568,7 @@ local function drawOverview(cv)
   local sh = math.max(1, #keys) + 2
   panel(cv, lx, sy, w - 2, sh, string.format("STORAGE (%d tank%s)", #tanks, #tanks == 1 and "" or "s"))
   if #keys == 0 then
-    cvWrite(cv, lx + 1, sy + 1, "No tanks connected (connect a tank with a wired modem to show it here)", C.grey)
+    cvWrite(cv, lx + 1, sy + 1, "No tanks connected", C.grey)
   end
   for i, k in ipairs(keys) do
     local s = storage[k]
@@ -633,17 +634,36 @@ local function drawTurbines(cv, list, title)
   cvWrite(cv, 2, cv.h, cv.name or "", C.grey)
 end
 
-local function setupCanvas(m)
+local function cardsFit(w, h)
+  return math.floor((w - 1) / CARD_W) * math.floor((h - 3) / CARD_H)
+end
+
+-- Sets up a monitor's canvas. The text size is the biggest that still fits (fits(w, h)), or
+-- CFG.textScale if set. It's only changed on a new or changed monitor (or when `key`, what it has
+-- to fit, changes): the program only redraws what changed, so it must not reset a screen that is
+-- already showing the dashboard.
+local function setupCanvas(m, fits, key)
   local ok = pcall(function()
-    -- Only set the text scale on a new or changed monitor: the program only redraws rows that
-    -- changed, so it must not reset a screen that is already showing the dashboard.
     local w, h = m.p.getSize()
-    if not m.canvas or m.canvas.w ~= w or m.canvas.h ~= h then
-      if m.p.setTextScale then m.p.setTextScale(CFG.textScale) end
+    if not m.canvas or m.canvas.w ~= w or m.canvas.h ~= h or m.fitKey ~= key then
+      if m.p.setTextScale then
+        if CFG.textScale > 0 then
+          m.p.setTextScale(CFG.textScale)
+        else
+          local scale = 5
+          while true do
+            m.p.setTextScale(scale)
+            local tw, th = m.p.getSize()
+            if scale <= 0.5 or fits(tw, th) then break end
+            scale = scale - 0.5
+          end
+        end
+      end
       w, h = m.p.getSize()
       local colour = m.p.isColour and m.p.isColour() or false
       m.canvas = newCanvas(w, h, colour)
       m.canvas.name = m.name
+      m.fitKey = key
       m.p.setBackgroundColour(colours.black)
       m.p.clear()
     end
@@ -654,30 +674,24 @@ end
 
 local function drawAll()
   if #monitors == 0 then return end
-  -- how many turbine cards each turbine monitor holds
   local turbineMons = {}
   for i = 2, #monitors do turbineMons[#turbineMons + 1] = monitors[i] end
-  for _, m in ipairs(monitors) do setupCanvas(m) end
+  -- the turbines are spread evenly over the turbine monitors
+  local share = #turbineMons > 0 and math.max(1, math.ceil(#turbines / #turbineMons)) or 0
 
   local first = monitors[1]
+  setupCanvas(first, function(w, h) return w >= 80 and h >= 30 end, "overview")
   if first.canvas then
     drawOverview(first.canvas)
-    if #turbineMons == 0 then
-      -- only one monitor: put as many turbine cards as fit under the overview instead of the graph
-    end
     if not pcall(cvFlush, first.canvas, first.p) then first.canvas = nil end
   end
 
   local index = 1
-  for n, m in ipairs(turbineMons) do
+  for _, m in ipairs(turbineMons) do
+    setupCanvas(m, function(w, h) return cardsFit(w, h) >= share end, share)
     if m.canvas then
       local cv = m.canvas
-      local perRow = math.max(1, math.floor((cv.w - 1) / CARD_W))
-      local rowsFit = math.max(1, math.floor((cv.h - 3) / CARD_H))
-      local fits = perRow * rowsFit
-      -- spread the turbines evenly over the turbine monitors
-      local share = math.ceil(#turbines / #turbineMons)
-      local count = math.min(fits, share)
+      local count = math.min(cardsFit(cv.w, cv.h), share)
       local list = {}
       for i = index, math.min(#turbines, index + count - 1) do list[#list + 1] = turbines[i] end
       local title = #list > 0 and string.format("TURBINES %s - %s", list[1].label, list[#list].label) or "TURBINES"
