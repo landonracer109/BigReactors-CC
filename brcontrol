@@ -10,7 +10,7 @@
 -- fill up (nothing is using the power), turbines are stood down one at a time, and brought back
 -- when the power is needed again.
 
-local VERSION = "v2"
+local VERSION = "v3"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
@@ -23,7 +23,7 @@ local CFG = {
   control       = 2,     -- seconds between control rod adjustments (3 reactor reads each)
   update        = 6,     -- seconds between turbine reads and dashboard redraws (a multiple of control)
   textScale     = 0,     -- monitor text size 0.5-5; 0 = the biggest that fits
-  monitorOrder  = {},    -- e.g. { "monitor_0", "monitor_1", "monitor_2", "monitor_3" }; empty = by name.
+  monitorOrder  = { "right", "monitor_6", "monitor_4", "monitor_5" },  -- empty {} = by name.
                          -- The first is the overview, the rest show the turbines.
 }
 
