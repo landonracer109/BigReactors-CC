@@ -10,7 +10,7 @@
 -- fill up (nothing is using the power), turbines are stood down one at a time, and brought back
 -- when the power is needed again.
 
-local VERSION = "v5"
+local VERSION = "v6"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
@@ -20,6 +20,7 @@ local CFG = {
   bufferLow     = 0.50,  -- it comes back when its buffer drops below this
   standDownWait = 20,    -- at most one turbine stands down per this many seconds
   steamPerRod   = 4000,  -- roughly how many mB/t of steam 1% of control rod changes (measured on the 16x16x14 reactor)
+  steamMargin   = 500,   -- mB/t of steam made above what the turbines use, to keep them full
   control       = 2,     -- seconds between control rod adjustments (3 reactor reads each)
   update        = 6,     -- seconds between turbine reads and dashboard redraws (a multiple of control)
   textScale     = 0,     -- monitor text size 0.5-5; 0 = the biggest that fits
@@ -334,15 +335,16 @@ local function controlReactor()
       settleUntil = now + 3 * CFG.control
     end
     lastWant = want
-    local surplus = R.steamMade - want
-    -- The reactor pushes all its steam to the turbines every tick, so steam still in its tank is
-    -- steam the turbines couldn't take: it's making more than they use, even when the "made"
-    -- figure is held down by the full tanks.
-    surplus = surplus + math.min(R.steam, want * 0.5)
-    -- At the tank limit the reactor may have more heat than it can boil: ease the rods in until
-    -- it drops below the limit, then the controller brings it back.
-    if R.steamMax > 0 and want >= R.steamMax and R.steamMade >= R.steamMax * 0.998 then
-      surplus = surplus + want * 0.02
+    -- Aim CFG.steamMargin above what the turbines use, so they stay full when the reactor dips.
+    -- The reactor pushes all its steam to the turbines every tick, so steam left in its tank is
+    -- steam they couldn't take. A little of it counts against the margin (it settles with a few
+    -- thousand mB banked in the tank); the reading jumps a lot, so it's weighted lightly.
+    local margin = math.min(CFG.steamMargin, R.steamMax > 0 and math.max(0, R.steamMax - want) or CFG.steamMargin)
+    local surplus = R.steamMade - want - margin + 0.1 * math.min(R.steam, want * 0.5)
+    -- At the tank limit (made plus what's left in the tank fills it) the reactor may have more
+    -- heat than it can boil: ease the rods in until it drops below the limit.
+    if R.steamMax > 0 and R.steamMade + R.steam >= R.steamMax * 0.99 then
+      surplus = math.max(surplus, 0) + want * 0.02
     end
     -- PI controller in velocity form: react to the change in surplus (P) plus a slow push on the
     -- surplus itself (I). Tuned for the real reactor, which responds within seconds.
