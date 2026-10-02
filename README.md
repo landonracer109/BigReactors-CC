@@ -5,8 +5,9 @@ dashboard on up to 4 advanced monitors.
 
 - **Control rods** are set so the reactor makes exactly the steam the running turbines use.
 - **Turbines** spin up with their coils off, then run with coils on at full steam (2,000 mB/t).
-- **Load following:** when the turbines' power buffers fill up, turbines stand down one at a time
-  and come back when the power is needed.
+- **Load following:** a turbine whose power buffer is full (its power has nowhere to go) stands down,
+  and comes back when its buffer drains. Tesseracts drain turbines one after another, so this is
+  judged per turbine.
 - **Steam limit:** one reactor can boil at most 50,000 mB/t (25 turbines). Extra turbines are kept
   as spares so the rest get full steam.
 - **Dashboard:** reactor status, rods, steam, water, temperatures, fuel, total RF/t, RF per ingot,

@@ -10,16 +10,16 @@
 -- fill up (nothing is using the power), turbines are stood down one at a time, and brought back
 -- when the power is needed again.
 
-local VERSION = "v3"
+local VERSION = "v4"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
   coilsOffBelow = 1800,  -- RPM: below this the coils are disengaged so the rotor spins up faster
   coilsOnAbove  = 2400,  -- RPM: at or above this the coils are engaged
-  bufferHigh    = 0.90,  -- average turbine power buffer above this: stand a turbine down
-  bufferLow     = 0.50,  -- below this: bring a stood-down turbine back
-  standDownWait = 20,    -- seconds between standing turbines down
-  steamPerRod   = 3000,  -- roughly how many mB/t of steam 1% of control rod changes (for the controller)
+  bufferHigh    = 0.95,  -- a turbine whose power buffer is this full stands down (its power has nowhere to go)
+  bufferLow     = 0.50,  -- it comes back when its buffer drops below this
+  standDownWait = 20,    -- at most one turbine stands down per this many seconds
+  steamPerRod   = 4000,  -- roughly how many mB/t of steam 1% of control rod changes (measured on the 16x16x14 reactor)
   control       = 2,     -- seconds between control rod adjustments (3 reactor reads each)
   update        = 6,     -- seconds between turbine reads and dashboard redraws (a multiple of control)
   textScale     = 0,     -- monitor text size 0.5-5; 0 = the biggest that fits
@@ -260,16 +260,21 @@ local function controlTurbines(now)
   end
   local avgBuffer = n > 0 and sum / n or 0
 
-  -- stand turbines down or bring them back, one at a time
-  if avgBuffer > CFG.bufferHigh and now - lastStandChange >= CFG.standDownWait then
-    for i = #turbines, 1, -1 do
-      local t = turbines[i]
-      if t.ok and not t.standby then t.standby = true; lastStandChange = now; break end
-    end
-  elseif avgBuffer < CFG.bufferLow and now - lastStandChange >= CFG.update * 3 then
+  -- Each turbine on its own: one whose power buffer is full can't send its power anywhere, so
+  -- its steam would be wasted. It stands down, and comes back when its buffer has drained
+  -- (a Tesseract drains senders one after another, not evenly). At most one turbine stands down
+  -- per CFG.standDownWait seconds, so the reactor eases down instead of dropping all at once.
+  for _, t in ipairs(turbines) do
+    if t.ok and t.standby and t.buffer < CFG.bufferLow then t.standby = false end
+  end
+  if now - lastStandChange >= CFG.standDownWait then
+    local fullest
     for _, t in ipairs(turbines) do
-      if t.ok and t.standby then t.standby = false; lastStandChange = now; break end
+      if t.ok and not t.standby and t.buffer >= CFG.bufferHigh and (not fullest or t.buffer > fullest.buffer) then
+        fullest = t
+      end
     end
+    if fullest then fullest.standby = true; lastStandChange = now end
   end
 
   -- A reactor's steam tank holds 50,000 mB at most, and it can't boil more than that per tick.
@@ -303,6 +308,8 @@ local function controlTurbines(now)
 end
 
 local lastSurplus = nil
+local lastWant = nil       -- steam wanted at the last update
+local settleUntil = 0      -- no controller steps until then (after a turbine starts or stops)
 
 local function controlReactor()
   if not R.ok then controlNote = "Reactor not connected"; return end
@@ -313,15 +320,25 @@ local function controlReactor()
   if demand <= 0 then
     rods = 100
     lastSurplus = nil
+    lastWant = 0
     controlNote = "No turbines: rods in"
   else
     -- How much more (+) or less (-) steam the reactor makes than the turbines take, in mB/t.
     local want = math.min(demand, R.steamMax > 0 and R.steamMax or demand)
+    local now = os.clock()
+    -- A turbine started or stood down: move the rods by the expected amount straight away, then
+    -- give the reactor a few seconds to respond before the controller takes over again.
+    if lastWant and want ~= lastWant then
+      rods = clamp(rods + (lastWant - want) / CFG.steamPerRod, 0, 100)
+      lastSurplus = nil
+      settleUntil = now + 3 * CFG.control
+    end
+    lastWant = want
     local surplus = R.steamMade - want
     -- The reactor pushes all its steam to the turbines every tick, so steam still in its tank is
     -- steam the turbines couldn't take: it's making more than they use, even when the "made"
     -- figure is held down by the full tanks.
-    surplus = surplus + R.steam
+    surplus = surplus + math.min(R.steam, want * 0.5)
     -- At the tank limit the reactor may have more heat than it can boil: ease the rods in until
     -- it drops below the limit, then the controller brings it back.
     if R.steamMax > 0 and want >= R.steamMax and R.steamMade >= R.steamMax * 0.998 then
@@ -332,6 +349,7 @@ local function controlReactor()
     local prev = lastSurplus or surplus
     local step = clamp((0.5 * (surplus - prev) + 0.05 * CFG.control * surplus) / CFG.steamPerRod, -2, 2)
     lastSurplus = surplus
+    if now < settleUntil then step = 0 end
     local water = R.waterMax > 0 and R.water / R.waterMax or 0
     if water < 0.05 then
       step = 1
