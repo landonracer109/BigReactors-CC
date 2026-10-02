@@ -1,0 +1,785 @@
+-- brcontrol: controls an actively cooled Big Reactors reactor and its turbines, with a dashboard.
+-- ComputerCraft 1.63 + Big Reactors 0.3.4.
+--
+-- Setup: connect the reactor's Computer Port, every turbine's Computer Port and the monitors to
+-- this computer with networking cable and wired modems (right-click each modem so it turns red).
+-- Save this as "startup" so it starts again after a server restart.
+--
+-- The reactor's control rods are set so it makes as much steam as the running turbines use.
+-- Turbines spin up with their coils off, then run with coils on. If the turbines' power buffers
+-- fill up (nothing is using the power), turbines are stood down one at a time, and brought back
+-- when the power is needed again.
+
+local VERSION = "v1"
+
+local CFG = {
+  turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
+  coilsOffBelow = 1800,  -- RPM: below this the coils are disengaged so the rotor spins up faster
+  coilsOnAbove  = 2400,  -- RPM: at or above this the coils are engaged
+  bufferHigh    = 0.90,  -- average turbine power buffer above this: stand a turbine down
+  bufferLow     = 0.50,  -- below this: bring a stood-down turbine back
+  standDownWait = 20,    -- seconds between standing turbines down
+  steamPerRod   = 3000,  -- roughly how many mB/t of steam 1% of control rod changes (for the controller)
+  control       = 2,     -- seconds between control rod adjustments (3 reactor reads each)
+  update        = 6,     -- seconds between turbine reads and dashboard redraws (a multiple of control)
+  textScale     = 0.5,
+  monitorOrder  = {},    -- e.g. { "monitor_0", "monitor_1", "monitor_2", "monitor_3" }; empty = by name.
+                         -- The first is the overview, the rest show the turbines.
+}
+
+---------------------------------------------------------------------------------------------------
+-- helpers
+
+local function clamp(v, lo, hi) if v < lo then return lo elseif v > hi then return hi end return v end
+
+local function commas(n)
+  local s = tostring(math.floor(math.abs(n) + 0.5))
+  local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  if out:sub(1, 1) == "," then out = out:sub(2) end
+  return (n < 0 and "-" or "") .. out
+end
+
+-- n with `places` decimals. (ComputerCraft 1.63's string.format ignores "%.2f" precision.)
+local function dec(n, places)
+  local scale = 10 ^ places
+  local v = math.floor(math.abs(n) * scale + 0.5)
+  local whole = math.floor(v / scale)
+  local frac = tostring(v - whole * scale)
+  frac = string.rep("0", places - #frac) .. frac
+  return (n < 0 and v > 0 and "-" or "") .. commas(whole) .. (places > 0 and ("." .. frac) or "")
+end
+
+local function short(n)
+  local a = math.abs(n)
+  if a >= 1e9 then return dec(n / 1e9, 2) .. "G" end
+  if a >= 1e6 then return dec(n / 1e6, 2) .. "M" end
+  if a >= 1e4 then return dec(n / 1e3, 1) .. "k" end
+  return commas(n)
+end
+
+local function pct(f) return string.format("%d%%", math.floor(clamp(f, 0, 9.99) * 100 + 0.5)) end
+
+-- Rounded for display, so small wobbles do not make the monitors redraw.
+local function round(n, step) return math.floor(n / step + 0.5) * step end
+
+-- Calls a peripheral method; returns nil instead of failing (a machine can be unloaded or broken).
+local function try(p, method, ...)
+  if not p then return nil end
+  local ok, v = pcall(p[method], ...)
+  if ok then return v end
+  return nil
+end
+
+local function num(v) return tonumber(v) or 0 end
+
+---------------------------------------------------------------------------------------------------
+-- peripherals
+
+local reactor, reactorName
+local turbines = {}   -- { name, p, label, state fields... }
+local monitors = {}   -- { name, p, canvas }
+local tanks = {}      -- { name, p } fluid tanks read through OpenPeripherals
+local storage = {}    -- fluid name -> { amount, capacity, count }
+local rodCount = 0
+local rodCache = {}
+
+local function naturalLess(a, b)
+  local pa, na = a:match("^(.-)(%d*)$")
+  local pb, nb = b:match("^(.-)(%d*)$")
+  if pa ~= pb then return pa < pb end
+  return (tonumber(na) or -1) < (tonumber(nb) or -1)
+end
+
+-- Big Reactors 0.3.4's getNumberOfControlRods returns the number of fuel rod blocks, and a rod
+-- index past the end throws, so count the control rods by asking for each one in turn.
+local function countRods()
+  local n = 0
+  while n < 1000 and pcall(reactor.getControlRodLevel, n) do n = n + 1 end
+  return n
+end
+
+local function scan()
+  local names = peripheral.getNames()
+  table.sort(names, naturalLess)
+  local oldTurbines = {}
+  for _, t in ipairs(turbines) do oldTurbines[t.name] = t end
+  local newReactor, newReactorName
+  turbines = {}
+  tanks = {}
+  local mons = {}
+  for _, name in ipairs(names) do
+    local kind = peripheral.getType(name)
+    if kind == "BigReactors-Reactor" and not newReactor then
+      newReactor, newReactorName = peripheral.wrap(name), name
+    elseif kind == "BigReactors-Turbine" then
+      local t = oldTurbines[name] or { name = name, standby = false, spunUp = false }
+      t.p = peripheral.wrap(name)
+      if not t.ventSet then
+        -- "Vent overflow" (Big Reactors' default): if the water can't go back fast enough, the
+        -- extra is vented instead of the turbine stopping. "Do not vent" can stall turbines.
+        t.ventSet = pcall(t.p.setVentOverflow)
+      end
+      turbines[#turbines + 1] = t
+      t.label = "T" .. #turbines
+    elseif kind == "monitor" then
+      mons[#mons + 1] = name
+    elseif kind then
+      -- Tanks (Thermal Expansion portable tanks, drums...) are readable through OpenPeripherals'
+      -- getTankInfo. Any tank on the network is shown in the storage panel.
+      local methods = peripheral.getMethods(name) or {}
+      for _, m in ipairs(methods) do
+        if m == "getTankInfo" then tanks[#tanks + 1] = { name = name, p = peripheral.wrap(name) }; break end
+      end
+    end
+  end
+  if newReactorName ~= reactorName then
+    reactor, reactorName = newReactor, newReactorName
+    rodCache = {}
+    rodCount = reactor and countRods() or 0
+  end
+  -- monitors: configured order first, then the rest by name
+  local ordered, used = {}, {}
+  for _, name in ipairs(CFG.monitorOrder) do
+    if peripheral.getType(name) == "monitor" then ordered[#ordered + 1] = name; used[name] = true end
+  end
+  for _, name in ipairs(mons) do if not used[name] then ordered[#ordered + 1] = name end end
+  local oldMons = {}
+  for _, m in ipairs(monitors) do oldMons[m.name] = m end
+  monitors = {}
+  for _, name in ipairs(ordered) do
+    local m = oldMons[name] or { name = name }
+    m.p = peripheral.wrap(name)
+    monitors[#monitors + 1] = m
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- reading
+
+local R = { ok = false }   -- reactor readings
+
+-- The three readings the rod controller needs; every CFG.control seconds.
+local function readReactorFast()
+  if not reactor then R.ok = false; return end
+  local made = try(reactor, "getHotFluidProducedLastTick")
+  if made == nil then R.ok = false; return end
+  R.ok = true
+  R.steamMade = num(made)
+  R.steam = math.max(0, num(try(reactor, "getHotFluidAmount")))
+  R.water = num(try(reactor, "getCoolantAmount"))
+end
+
+-- Everything else, for the dashboard; every CFG.update seconds.
+local function readReactorSlow()
+  if not R.ok then return end
+  R.active = try(reactor, "getActive") and true or false
+  R.cooled = try(reactor, "isActivelyCooled") and true or false
+  R.fuelTemp = num(try(reactor, "getFuelTemperature"))
+  R.caseTemp = num(try(reactor, "getCasingTemperature"))
+  R.fuel = num(try(reactor, "getFuelAmount"))
+  R.fuelMax = num(try(reactor, "getFuelAmountMax"))
+  R.waste = num(try(reactor, "getWasteAmount"))
+  R.burn = num(try(reactor, "getFuelConsumedLastTick"))
+  R.reactivity = num(try(reactor, "getFuelReactivity"))
+  R.waterMax = num(try(reactor, "getCoolantAmountMax"))
+  R.steamMax = num(try(reactor, "getHotFluidAmountMax"))
+end
+
+-- Adds up every connected tank by fluid. OpenPeripherals returns a list of tanks, each
+-- { capacity, amount, name, rawName, ... } (no fluid fields when empty).
+local function readStorage()
+  storage = {}
+  for _, tank in ipairs(tanks) do
+    local info = try(tank.p, "getTankInfo", "unknown")
+    if type(info) == "table" then
+      for _, t in pairs(info) do
+        if type(t) == "table" then
+          local fluid = tostring(t.rawName or t.name or "empty")
+          if (tonumber(t.amount) or 0) <= 0 then fluid = "empty" end
+          local key = fluid:lower()
+          local s = storage[key] or { label = fluid, amount = 0, capacity = 0, count = 0 }
+          s.amount = s.amount + (tonumber(t.amount) or 0)
+          s.capacity = s.capacity + (tonumber(t.capacity) or 0)
+          s.count = s.count + 1
+          storage[key] = s
+        end
+      end
+    end
+  end
+end
+
+-- Four readings per turbine. Its on/off, coils and flow setting only change when this program
+-- changes them, so those are read again just once a minute (in case someone used the GUI).
+local function readTurbine(t, full)
+  local p = t.p
+  local rpm = try(p, "getRotorSpeed")
+  t.ok = rpm ~= nil
+  if not t.ok then t.settingsKnown = false; return end
+  t.rpm = num(rpm)
+  t.rf = num(try(p, "getEnergyProducedLastTick"))
+  t.flow = num(try(p, "getFluidFlowRate"))
+  t.buffer = num(try(p, "getEnergyStored")) / 1000000
+  if full or not t.settingsKnown then
+    t.active = try(p, "getActive") and true or false
+    t.coils = try(p, "getInductorEngaged") and true or false
+    t.flowMax = num(try(p, "getFluidFlowRateMax"))
+    t.settingsKnown = true
+  end
+end
+
+-- Changes a turbine setting and remembers it, so it doesn't have to be read back.
+local function setTurbine(t, method, field, value)
+  if pcall(t.p[method], value) then t[field] = value end
+end
+
+---------------------------------------------------------------------------------------------------
+-- control
+
+local rods = nil          -- wanted control rod insertion, 0-100 (fractions are spread over the rods)
+local demand = 0
+local controlNote = ""
+local lastStandChange = -1000
+
+-- Sets the rods so their average is `level`: some rods one step further in than the others.
+local function applyRods(level)
+  if rodCount == 0 then return end
+  local base = math.floor(level)
+  local extra = math.floor((level - base) * rodCount + 0.5)
+  for i = 0, rodCount - 1 do
+    local want = math.min(100, base + ((i < extra) and 1 or 0))
+    if rodCache[i] ~= want then
+      if pcall(reactor.setControlRodLevel, i, want) then rodCache[i] = want else rodCache[i] = nil end
+    end
+  end
+end
+
+local function controlTurbines(now)
+  local running, sum, n = 0, 0, 0
+  for _, t in ipairs(turbines) do
+    if t.ok then n = n + 1; sum = sum + t.buffer end
+  end
+  local avgBuffer = n > 0 and sum / n or 0
+
+  -- stand turbines down or bring them back, one at a time
+  if avgBuffer > CFG.bufferHigh and now - lastStandChange >= CFG.standDownWait then
+    for i = #turbines, 1, -1 do
+      local t = turbines[i]
+      if t.ok and not t.standby then t.standby = true; lastStandChange = now; break end
+    end
+  elseif avgBuffer < CFG.bufferLow and now - lastStandChange >= CFG.update * 3 then
+    for _, t in ipairs(turbines) do
+      if t.ok and t.standby then t.standby = false; lastStandChange = now; break end
+    end
+  end
+
+  -- A reactor's steam tank holds 50,000 mB at most, and it can't boil more than that per tick.
+  -- Turbines past what it can feed are kept as spares, so the rest get full steam.
+  local maxRunning = math.huge
+  if R.ok and R.steamMax > 0 then maxRunning = math.floor(R.steamMax / CFG.turbineFlow) end
+
+  demand = 0
+  for _, t in ipairs(turbines) do
+    if t.ok then
+      local spare = not t.standby and running >= maxRunning
+      if t.standby or spare then
+        if t.active then setTurbine(t, "setActive", "active", false) end
+        if t.coils then setTurbine(t, "setInductorEngaged", "coils", false) end
+        t.state = spare and "SPARE" or "STANDBY"
+      else
+        if not t.active then setTurbine(t, "setActive", "active", true) end
+        if t.flowMax ~= CFG.turbineFlow then setTurbine(t, "setFluidFlowRateMax", "flowMax", CFG.turbineFlow) end
+        if t.rpm >= CFG.coilsOnAbove then t.spunUp = true
+        elseif t.rpm < CFG.coilsOffBelow then t.spunUp = false end
+        if t.spunUp ~= t.coils then setTurbine(t, "setInductorEngaged", "coils", t.spunUp) end
+        t.state = t.spunUp and "RUNNING" or "SPIN-UP"
+        demand = demand + CFG.turbineFlow
+        running = running + 1
+      end
+    else
+      t.state = "OFFLINE"
+    end
+  end
+  return running, avgBuffer
+end
+
+local lastSurplus = nil
+
+local function controlReactor()
+  if not R.ok then controlNote = "Reactor not connected"; return end
+  if not R.cooled then controlNote = "Reactor is passive (no coolant ports): not controlling"; return end
+  if rods == nil then
+    rods = num(try(reactor, "getControlRodLevel", 0))
+  end
+  if demand <= 0 then
+    rods = 100
+    lastSurplus = nil
+    controlNote = "No turbines running: rods in"
+  else
+    -- How much more (+) or less (-) steam the reactor makes than the turbines take, in mB/t.
+    local want = math.min(demand, R.steamMax > 0 and R.steamMax or demand)
+    local surplus = R.steamMade - want
+    -- The reactor pushes all its steam to the turbines every tick, so steam still in its tank is
+    -- steam the turbines couldn't take: it's making more than they use, even when the "made"
+    -- figure is held down by the full tanks.
+    surplus = surplus + R.steam
+    -- At the tank limit the reactor may have more heat than it can boil: ease the rods in until
+    -- it drops below the limit, then the controller brings it back.
+    if R.steamMax > 0 and want >= R.steamMax and R.steamMade >= R.steamMax * 0.998 then
+      surplus = surplus + want * 0.02
+    end
+    -- PI controller in velocity form: react to the change in surplus (P) plus a slow push on the
+    -- surplus itself (I). Gentle enough for a reactor that takes 20+ seconds to respond.
+    local prev = lastSurplus or surplus
+    local step = clamp((0.5 * (surplus - prev) + 0.05 * CFG.control * surplus) / CFG.steamPerRod, -2, 2)
+    lastSurplus = surplus
+    local water = R.waterMax > 0 and R.water / R.waterMax or 0
+    if water < 0.05 then
+      step = 1
+      controlNote = "OUT OF WATER: rods going in"
+    elseif water < 0.2 and step < 0 then
+      step = 0
+      controlNote = "LOW WATER: holding rods"
+    elseif demand > want then
+      controlNote = "Steam limit reached (" .. commas(R.steamMax) .. " mB/t)"
+    else
+      controlNote = surplus < -want * 0.02 and "Raising steam" or
+                    surplus > want * 0.02 and "Lowering steam" or "Steady"
+    end
+    rods = clamp(rods + step, 0, 100)
+  end
+  applyRods(rods)
+  if demand > 0 and not R.active then try(reactor, "setActive", true) end
+end
+
+---------------------------------------------------------------------------------------------------
+-- drawing: each monitor has a canvas; only rows that changed are rewritten
+
+local HEX = "0123456789abcdef"
+local function colourOf(c) local i = HEX:find(c, 1, true); return 2 ^ (i - 1) end
+local C = { white = "0", orange = "1", yellow = "4", lime = "5", grey = "7", lightGrey = "8",
+            cyan = "9", blue = "b", green = "d", red = "e", black = "f", lightBlue = "3", purple = "a" }
+
+local function newCanvas(w, h, colour)
+  local cv = { w = w, h = h, colour = colour, text = {}, fg = {}, bg = {}, shown = {} }
+  return cv
+end
+
+local function cvClear(cv, bg)
+  for y = 1, cv.h do
+    local t, f, b = {}, {}, {}
+    for x = 1, cv.w do t[x] = " "; f[x] = C.white; b[x] = bg or C.black end
+    cv.text[y], cv.fg[y], cv.bg[y] = t, f, b
+  end
+end
+
+local function cvWrite(cv, x, y, s, fg, bg)
+  if y < 1 or y > cv.h then return end
+  s = tostring(s)
+  for i = 1, #s do
+    local cx = x + i - 1
+    if cx >= 1 and cx <= cv.w then
+      cv.text[y][cx] = s:sub(i, i)
+      if fg then cv.fg[y][cx] = fg end
+      if bg then cv.bg[y][cx] = bg end
+    end
+  end
+end
+
+local function cvFill(cv, x, y, w, h, bg)
+  for yy = y, y + h - 1 do
+    if yy >= 1 and yy <= cv.h then
+      for xx = x, x + w - 1 do
+        if xx >= 1 and xx <= cv.w then cv.text[yy][xx] = " "; cv.bg[yy][xx] = bg end
+      end
+    end
+  end
+end
+
+local function cvBar(cv, x, y, w, frac, fg, label)
+  local filled = math.floor(clamp(frac, 0, 1) * w + 0.5)
+  cvFill(cv, x, y, w, 1, C.grey)
+  cvFill(cv, x, y, filled, 1, fg)
+  if label then
+    local lx = x + math.floor((w - #label) / 2)
+    for i = 1, #label do
+      local cx = lx + i - 1
+      if cx >= x and cx < x + w then cvWrite(cv, cx, y, label:sub(i, i), C.white) end
+    end
+  end
+end
+
+-- Writes only the characters that changed since the last flush, to keep monitor calls (and the
+-- server's work) down. Throws if the monitor fails.
+local function cvFlush(cv, dev)
+  if not cv.st then cv.st, cv.sf, cv.sb = {}, {}, {} end
+  for y = 1, cv.h do
+    local T, F, B = cv.text[y], cv.fg[y], cv.bg[y]
+    local key = table.concat(T) .. table.concat(F) .. table.concat(B)
+    if cv.shown[y] ~= key then
+      local st, sf, sb = cv.st[y] or {}, cv.sf[y] or {}, cv.sb[y] or {}
+      local function differs(x) return T[x] ~= st[x] or F[x] ~= sf[x] or B[x] ~= sb[x] end
+      local x = 1
+      while x <= cv.w do
+        if not differs(x) then
+          x = x + 1
+        else
+          -- a stretch of changed characters (small unchanged gaps are rewritten too)
+          local e, gap = x, 0
+          while e < cv.w and gap <= 3 do
+            if differs(e + 1) then gap = 0 else gap = gap + 1 end
+            e = e + 1
+          end
+          e = e - gap
+          -- write it in runs of one colour
+          local s = x
+          while s <= e do
+            local f, b = F[s], B[s]
+            local r = s
+            while r < e and F[r + 1] == f and B[r + 1] == b do r = r + 1 end
+            dev.setCursorPos(s, y)
+            if cv.colour then
+              -- only send colour changes the monitor doesn't already have
+              if cv.curF ~= f then dev.setTextColour(colourOf(f)); cv.curF = f end
+              if cv.curB ~= b then dev.setBackgroundColour(colourOf(b)); cv.curB = b end
+            end
+            dev.write(table.concat(T, "", s, r))
+            for i = s, r do st[i], sf[i], sb[i] = T[i], F[i], B[i] end
+            s = r + 1
+          end
+          x = e + 1
+        end
+      end
+      cv.st[y], cv.sf[y], cv.sb[y] = st, sf, sb
+      cv.shown[y] = key
+    end
+  end
+end
+
+-- 3x5 digits for the big power figure
+local DIGITS = {
+  ["0"] = { "###", "# #", "# #", "# #", "###" }, ["1"] = { " # ", "## ", " # ", " # ", "###" },
+  ["2"] = { "###", "  #", "###", "#  ", "###" }, ["3"] = { "###", "  #", " ##", "  #", "###" },
+  ["4"] = { "# #", "# #", "###", "  #", "  #" }, ["5"] = { "###", "#  ", "###", "  #", "###" },
+  ["6"] = { "###", "#  ", "###", "# #", "###" }, ["7"] = { "###", "  #", "  #", "  #", "  #" },
+  ["8"] = { "###", "# #", "###", "# #", "###" }, ["9"] = { "###", "# #", "###", "  #", "###" },
+  [","] = { "   ", "   ", "   ", " # ", "#  " }, ["."] = { "   ", "   ", "   ", "   ", " # " },
+}
+
+local function cvBig(cv, x, y, s, colour)
+  for i = 1, #s do
+    local g = DIGITS[s:sub(i, i)]
+    if g then
+      for row = 1, 5 do
+        for col = 1, 3 do
+          if g[row]:sub(col, col) == "#" then cvFill(cv, x + col - 1, y + row - 1, 1, 1, colour) end
+        end
+      end
+    end
+    x = x + 4
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- dashboard content
+
+local history = {}          -- total RF/t samples
+local historyEvery = 60     -- seconds per sample (the graph moves once a minute)
+local lastHistory = -1000
+local startTime = os.clock()
+local totals = {}
+
+local function panel(cv, x, y, w, h, title)
+  cvFill(cv, x, y, w, h, C.black)
+  cvFill(cv, x, y, w, 1, C.blue)
+  cvWrite(cv, x + 1, y, title, C.white, C.blue)
+end
+
+local function kv(cv, x, y, w, key, value, colour)
+  cvWrite(cv, x, y, key, C.lightGrey)
+  cvWrite(cv, x + w - #value, y, value, colour or C.white)
+end
+
+local function drawOverview(cv)
+  cvClear(cv, C.black)
+  local w, h = cv.w, cv.h
+  cvFill(cv, 1, 1, w, 1, C.grey)
+  cvWrite(cv, 2, 1, "REACTOR + TURBINES  " .. VERSION, C.white, C.grey)
+  local up = os.clock() - startTime
+  local clock = string.format("up %dh %02dm", math.floor(up / 3600), math.floor(up % 3600 / 60))
+  cvWrite(cv, w - #clock, 1, clock, C.white, C.grey)
+
+  local half = math.floor((w - 3) / 2)
+  local lx, rx = 2, 3 + half
+  local inner = half - 2
+
+  -- reactor panel
+  panel(cv, lx, 3, half, 21, "REACTOR")
+  local y = 5
+  if not R.ok then
+    cvWrite(cv, lx + 1, y, "Not connected", C.red)
+  else
+    local status = R.active and "ONLINE" or "OFFLINE"
+    kv(cv, lx + 1, y, inner, "Status", status, R.active and C.lime or C.red); y = y + 1
+    kv(cv, lx + 1, y, inner, "Cooling", R.cooled and "active (steam)" or "passive", R.cooled and C.lime or C.orange); y = y + 1
+    kv(cv, lx + 1, y, inner, "Control rods", dec(rods or 0, 1) .. "%  (" .. rodCount .. " rods)"); y = y + 1
+    kv(cv, lx + 1, y, inner, "Controller", controlNote, C.yellow); y = y + 2
+    kv(cv, lx + 1, y, inner, "Steam made", commas(round(R.steamMade, 10)) .. " mB/t"); y = y + 1
+    kv(cv, lx + 1, y, inner, "Turbines want", commas(demand) .. " mB/t"); y = y + 1
+    cvWrite(cv, lx + 1, y, "Water", C.lightGrey)
+    cvBar(cv, lx + 14, y, inner - 13, R.waterMax > 0 and R.water / R.waterMax or 0, C.blue,
+      short(R.water) .. " / " .. short(R.waterMax)); y = y + 1
+    cvWrite(cv, lx + 1, y, "Steam tank", C.lightGrey)
+    cvBar(cv, lx + 14, y, inner - 13, R.steamMax > 0 and R.steam / R.steamMax or 0, C.lightGrey,
+      short(R.steam) .. " / " .. short(R.steamMax)); y = y + 2
+    kv(cv, lx + 1, y, inner, "Fuel temp", commas(R.fuelTemp) .. " C"); y = y + 1
+    kv(cv, lx + 1, y, inner, "Casing temp", commas(R.caseTemp) .. " C"); y = y + 1
+    cvWrite(cv, lx + 1, y, "Fuel", C.lightGrey)
+    cvBar(cv, lx + 14, y, inner - 13, R.fuelMax > 0 and R.fuel / R.fuelMax or 0, C.yellow,
+      short(R.fuel) .. " mB  " .. pct(R.fuelMax > 0 and R.fuel / R.fuelMax or 0)); y = y + 1
+    kv(cv, lx + 1, y, inner, "Waste", commas(R.waste) .. " mB"); y = y + 1
+    kv(cv, lx + 1, y, inner, "Fuel burn", dec(R.burn, 3) .. " mB/t  (" .. dec(R.burn * 1.2, 2) .. " ingots/min)"); y = y + 1
+    kv(cv, lx + 1, y, inner, "Reactivity", string.format("%d%%", math.floor(R.reactivity + 0.5)))
+  end
+
+  -- totals panel
+  panel(cv, rx, 3, half, 21, "POWER")
+  local bigRF = commas(round(totals.rf or 0, 100))
+  cvBig(cv, rx + 2, 5, bigRF, C.lime)
+  cvWrite(cv, rx + 2 + 4 * #bigRF, 9, "RF/t", C.lime)
+  y = 12
+  kv(cv, rx + 1, y, inner, "Turbines", string.format("%d running, %d standby, %d offline",
+    totals.running or 0, totals.standby or 0, totals.offline or 0)); y = y + 1
+  kv(cv, rx + 1, y, inner, "Steam used", commas(totals.flow or 0) .. " mB/t"); y = y + 1
+  kv(cv, rx + 1, y, inner, "Average RPM", commas(round(totals.rpm or 0, 10))); y = y + 1
+  kv(cv, rx + 1, y, inner, "RF per mB steam", dec((totals.flow or 0) > 0 and totals.rf / totals.flow or 0, 2)); y = y + 1
+  local perIngot = (R.burn or 0) > 0 and (totals.rf or 0) / R.burn * 1000 or 0
+  kv(cv, rx + 1, y, inner, "RF per ingot", perIngot > 0 and short(perIngot) or "-"); y = y + 1
+  cvWrite(cv, rx + 1, y, "Buffers", C.lightGrey)
+  cvBar(cv, rx + 14, y, inner - 13, totals.buffer or 0, C.red, pct(totals.buffer or 0)); y = y + 2
+  cvWrite(cv, rx + 1, y, "Peripheral: " .. (reactorName or "-"), C.grey)
+
+  -- storage: connected tanks, added up by fluid (water and steam first)
+  local keys = {}
+  for k in pairs(storage) do keys[#keys + 1] = k end
+  local order = { water = 1, steam = 2, empty = 99 }
+  table.sort(keys, function(a, b) return (order[a] or 50) < (order[b] or 50) or ((order[a] or 50) == (order[b] or 50) and a < b) end)
+  local sy = 25
+  local sh = math.max(1, #keys) + 2
+  panel(cv, lx, sy, w - 2, sh, string.format("STORAGE (%d tank%s)", #tanks, #tanks == 1 and "" or "s"))
+  if #keys == 0 then
+    cvWrite(cv, lx + 1, sy + 1, "No tanks connected (connect a tank with a wired modem to show it here)", C.grey)
+  end
+  for i, k in ipairs(keys) do
+    local s = storage[k]
+    local barColour = k == "water" and C.blue or k == "steam" and C.lightGrey or C.cyan
+    local label = k == "empty" and "Empty tanks" or s.label
+    cvWrite(cv, lx + 1, sy + i, label, C.lightGrey)
+    local text = k == "empty" and (commas(s.capacity) .. " mB free in " .. s.count .. " tank" .. (s.count == 1 and "" or "s"))
+      or (commas(s.amount) .. " / " .. commas(s.capacity) .. " mB  " .. pct(s.capacity > 0 and s.amount / s.capacity or 0))
+    cvBar(cv, lx + 16, sy + i, w - 20, s.capacity > 0 and s.amount / s.capacity or 0, barColour, text)
+  end
+
+  -- history graph of total RF/t
+  local gy = sy + sh + 1
+  local gh = h - gy - 1
+  if gh >= 5 then
+    panel(cv, lx, gy, w - 2, gh + 1, string.format("TOTAL RF/t, last %d min", math.floor((w - 4) * historyEvery / 60)))
+    local maxv = 1
+    for _, v in ipairs(history) do if v > maxv then maxv = v end end
+    cvWrite(cv, w - 2 - #short(maxv), gy, short(maxv), C.white, C.blue)
+    local gw = w - 4
+    local first = math.max(1, #history - gw + 1)
+    for i = first, #history do
+      local col = lx + 1 + (i - first)
+      local bar = math.floor(history[i] / maxv * (gh - 1) + 0.5)
+      cvFill(cv, col, gy + gh - bar, 1, bar, C.green)
+    end
+  end
+  cvWrite(cv, 2, h, cv.name or "", C.grey)
+end
+
+local CARD_W, CARD_H = 27, 7
+
+local function drawCard(cv, x, y, t)
+  local stateColour = ({ RUNNING = C.green, ["SPIN-UP"] = C.orange, STANDBY = C.grey, SPARE = C.purple, OFFLINE = C.red })[t.state] or C.grey
+  cvFill(cv, x, y, CARD_W - 1, CARD_H - 1, C.black)
+  cvFill(cv, x, y, CARD_W - 1, 1, stateColour)
+  cvWrite(cv, x + 1, y, t.label, C.white, stateColour)
+  cvWrite(cv, x + CARD_W - 2 - #(t.state or ""), y, t.state or "", C.white, stateColour)
+  if not t.ok then
+    cvWrite(cv, x + 1, y + 2, "not connected", C.red)
+    cvWrite(cv, x + 1, y + 3, t.name, C.grey)
+    return
+  end
+  local rpmColour = (t.rpm > 2400 and t.rpm < 2900) and C.lime or (t.rpm > 2900 and C.red or C.yellow)
+  kv(cv, x + 1, y + 1, CARD_W - 3, "RPM", commas(round(t.rpm, 10)), rpmColour)
+  kv(cv, x + 1, y + 2, CARD_W - 3, "RF/t", commas(round(t.rf, 100)))
+  kv(cv, x + 1, y + 3, CARD_W - 3, "Steam", commas(t.flow) .. "/" .. commas(t.flowMax) .. " mB/t")
+  kv(cv, x + 1, y + 4, CARD_W - 3, "Coils", t.coils and "ON" or "OFF", t.coils and C.lime or C.orange)
+  cvWrite(cv, x + 1, y + 5, "Buf", C.lightGrey)
+  cvBar(cv, x + 5, y + 5, CARD_W - 7, t.buffer, C.red, pct(t.buffer))
+end
+
+local function drawTurbines(cv, list, title)
+  cvClear(cv, C.black)
+  cvFill(cv, 1, 1, cv.w, 1, C.grey)
+  cvWrite(cv, 2, 1, title, C.white, C.grey)
+  local perRow = math.max(1, math.floor((cv.w - 1) / CARD_W))
+  for i, t in ipairs(list) do
+    local col = (i - 1) % perRow
+    local row = math.floor((i - 1) / perRow)
+    drawCard(cv, 2 + col * CARD_W, 3 + row * CARD_H, t)
+  end
+  cvWrite(cv, 2, cv.h, cv.name or "", C.grey)
+end
+
+local function setupCanvas(m)
+  local ok = pcall(function()
+    -- Only set the text scale on a new or changed monitor: the program only redraws rows that
+    -- changed, so it must not reset a screen that is already showing the dashboard.
+    local w, h = m.p.getSize()
+    if not m.canvas or m.canvas.w ~= w or m.canvas.h ~= h then
+      if m.p.setTextScale then m.p.setTextScale(CFG.textScale) end
+      w, h = m.p.getSize()
+      local colour = m.p.isColour and m.p.isColour() or false
+      m.canvas = newCanvas(w, h, colour)
+      m.canvas.name = m.name
+      m.p.setBackgroundColour(colours.black)
+      m.p.clear()
+    end
+  end)
+  if not ok then m.canvas = nil end
+  return ok
+end
+
+local function drawAll()
+  if #monitors == 0 then return end
+  -- how many turbine cards each turbine monitor holds
+  local turbineMons = {}
+  for i = 2, #monitors do turbineMons[#turbineMons + 1] = monitors[i] end
+  for _, m in ipairs(monitors) do setupCanvas(m) end
+
+  local first = monitors[1]
+  if first.canvas then
+    drawOverview(first.canvas)
+    if #turbineMons == 0 then
+      -- only one monitor: put as many turbine cards as fit under the overview instead of the graph
+    end
+    if not pcall(cvFlush, first.canvas, first.p) then first.canvas = nil end
+  end
+
+  local index = 1
+  for n, m in ipairs(turbineMons) do
+    if m.canvas then
+      local cv = m.canvas
+      local perRow = math.max(1, math.floor((cv.w - 1) / CARD_W))
+      local rowsFit = math.max(1, math.floor((cv.h - 3) / CARD_H))
+      local fits = perRow * rowsFit
+      -- spread the turbines evenly over the turbine monitors
+      local share = math.ceil(#turbines / #turbineMons)
+      local count = math.min(fits, share)
+      local list = {}
+      for i = index, math.min(#turbines, index + count - 1) do list[#list + 1] = turbines[i] end
+      local title = #list > 0 and string.format("TURBINES %s - %s", list[1].label, list[#list].label) or "TURBINES"
+      drawTurbines(cv, list, title)
+      index = index + count
+      if not pcall(cvFlush, cv, m.p) then m.canvas = nil end
+    end
+  end
+end
+
+-- the computer's own screen: a short summary
+local function drawTerminal()
+  term.setBackgroundColour(colours.black)
+  term.clear()
+  term.setCursorPos(1, 1)
+  print("brcontrol " .. VERSION .. " - reactor + turbine controller")
+  print("")
+  print("Reactor:  " .. (R.ok and ((R.active and "online" or "offline") .. ", rods " .. dec(rods or 0, 1) .. "%") or "not connected"))
+  print("Steam:    " .. commas(R.steamMade or 0) .. " made / " .. commas(demand) .. " wanted mB/t")
+  print("Water:    " .. commas(R.water or 0) .. " / " .. commas(R.waterMax or 0) .. " mB")
+  print("Control:  " .. controlNote)
+  print("Power:    " .. commas(totals.rf or 0) .. " RF/t")
+  print(string.format("Turbines: %d running, %d standby, %d offline", totals.running or 0, totals.standby or 0, totals.offline or 0))
+  print("Monitors: " .. #monitors)
+  print("")
+  print("Press Q to stop (the reactor keeps its rods).")
+end
+
+---------------------------------------------------------------------------------------------------
+-- main loop
+
+local lastUpdate, lastFullRead, avgBuffer = -1000, -1000, 0
+
+-- Every CFG.control seconds: 3 reactor reads and the rod controller. Every CFG.update seconds
+-- also: the turbines (4 reads each), tanks, the rest of the reactor, and the dashboard.
+local function tick(now)
+  readReactorFast()
+  local slow = now - lastUpdate >= CFG.update - 0.01
+  if slow then
+    lastUpdate = now
+    readReactorSlow()
+    local full = now - lastFullRead >= 60
+    if full then lastFullRead = now end
+    for _, t in ipairs(turbines) do readTurbine(t, full) end
+    readStorage()
+    local _
+    _, avgBuffer = controlTurbines(now)
+  end
+  controlReactor()
+  if not slow then return end
+
+  totals = { rf = 0, flow = 0, rpm = 0, running = 0, standby = 0, offline = 0, buffer = avgBuffer }
+  local spinning = 0
+  for _, t in ipairs(turbines) do
+    if t.ok then
+      totals.rf = totals.rf + t.rf
+      totals.flow = totals.flow + t.flow
+      if t.state == "STANDBY" or t.state == "SPARE" then totals.standby = totals.standby + 1 else
+        totals.running = totals.running + 1
+        totals.rpm = totals.rpm + t.rpm
+        spinning = spinning + 1
+      end
+    else
+      totals.offline = totals.offline + 1
+    end
+  end
+  totals.rpm = spinning > 0 and totals.rpm / spinning or 0
+  if now - lastHistory >= historyEvery then
+    history[#history + 1] = totals.rf
+    if #history > 400 then table.remove(history, 1) end
+    lastHistory = now
+  end
+  drawAll()
+  drawTerminal()
+end
+
+scan()
+local rescanAt = os.clock() + 60
+local timer = os.startTimer(0)
+while true do
+  local event, p1 = os.pullEventRaw()
+  if event == "timer" and p1 == timer then
+    local now = os.clock()
+    -- Look for added or removed machines once a minute (and when a modem reports a change).
+    if now >= rescanAt then pcall(scan); rescanAt = now + 60 end
+    local ok, err = pcall(tick, now)
+    if not ok then
+      term.setCursorPos(1, 18)
+      term.setTextColour(colours.red)
+      term.write("Error: " .. tostring(err))
+      term.setTextColour(colours.white)
+    end
+    timer = os.startTimer(CFG.control)
+  elseif event == "peripheral" or event == "peripheral_detach" or event == "monitor_resize" then
+    rescanAt = os.clock()
+  elseif event == "key" and p1 == keys.q then
+    term.clear(); term.setCursorPos(1, 1)
+    print("brcontrol stopped.")
+    return
+  elseif event == "terminate" then
+    term.clear(); term.setCursorPos(1, 1)
+    print("brcontrol stopped.")
+    return
+  end
+end
