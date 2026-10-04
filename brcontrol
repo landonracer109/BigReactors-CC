@@ -10,15 +10,15 @@
 -- fill up (nothing is using the power), turbines are stood down one at a time, and brought back
 -- when the power is needed again.
 
-local VERSION = "v6"
+local VERSION = "v7"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
   coilsOffBelow = 1800,  -- RPM: below this the coils are disengaged so the rotor spins up faster
   coilsOnAbove  = 2400,  -- RPM: at or above this the coils are engaged
-  bufferHigh    = 0.95,  -- a turbine whose power buffer is this full stands down (its power has nowhere to go)
-  bufferLow     = 0.50,  -- it comes back when its buffer drops below this
-  standDownWait = 20,    -- at most one turbine stands down per this many seconds
+  bufferHigh    = 0.99,  -- a turbine whose power buffer is this full stands down (its power has nowhere to go)
+  bufferLow     = 0.20,  -- it comes back when its buffer drops below this (far apart, so turbines rarely cycle)
+  standDownWait = 60,    -- at most one turbine stands down per this many seconds
   steamPerRod   = 4000,  -- roughly how many mB/t of steam 1% of control rod changes (measured on the 16x16x14 reactor)
   steamMargin   = 500,   -- mB/t of steam made above what the turbines use, to keep them full
   control       = 2,     -- seconds between control rod adjustments (3 reactor reads each)
