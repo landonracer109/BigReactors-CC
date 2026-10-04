@@ -8,9 +8,10 @@
 -- The reactor's control rods are set so it makes as much steam as the running turbines use.
 -- Turbines spin up with their coils off, then run with coils on. If the turbines' power buffers
 -- fill up (nothing is using the power), turbines are stood down one at a time, and brought back
--- when the power is needed again.
+-- when the power is needed again. Stood-down turbines are kept at speed with their coils off,
+-- so they make full power as soon as they're back.
 
-local VERSION = "v7"
+local VERSION = "v8"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
@@ -19,6 +20,8 @@ local CFG = {
   bufferHigh    = 0.99,  -- a turbine whose power buffer is this full stands down (its power has nowhere to go)
   bufferLow     = 0.20,  -- it comes back when its buffer drops below this (far apart, so turbines rarely cycle)
   standDownWait = 60,    -- at most one turbine stands down per this many seconds
+  standbyRPM    = 2500,  -- RPM: stood-down turbines are kept spinning up to this, coils off
+  holdFlow      = 50,    -- mB/t of steam that keeps a stood-down turbine at speed
   steamPerRod   = 4000,  -- roughly how many mB/t of steam 1% of control rod changes (measured on the 16x16x14 reactor)
   steamMargin   = 500,   -- mB/t of steam made above what the turbines use, to keep them full
   control       = 2,     -- seconds between control rod adjustments (3 reactor reads each)
@@ -288,8 +291,6 @@ local function controlTurbines(now)
     if t.ok then
       local spare = not t.standby and running >= maxRunning
       if t.standby or spare then
-        if t.active then setTurbine(t, "setActive", "active", false) end
-        if t.coils then setTurbine(t, "setInductorEngaged", "coils", false) end
         t.state = spare and "SPARE" or "STANDBY"
       else
         if not t.active then setTurbine(t, "setActive", "active", true) end
@@ -303,6 +304,30 @@ local function controlTurbines(now)
       end
     else
       t.state = "OFFLINE"
+    end
+  end
+
+  -- Stood-down turbines stay at speed with their coils off, so they make full power the moment
+  -- they're back: full steam below coil speed (if the reactor has steam to spare), a trickle up to
+  -- CFG.standbyRPM, none above. Spares (more turbines than the reactor can feed) are just off.
+  local steamLeft = (R.ok and R.steamMax > 0) and R.steamMax - demand or math.huge
+  for _, t in ipairs(turbines) do
+    if t.ok and (t.state == "STANDBY" or t.state == "SPARE") then
+      local flow = 0
+      if t.state == "STANDBY" then
+        if t.rpm < CFG.coilsOnAbove and steamLeft >= CFG.turbineFlow then flow = CFG.turbineFlow
+        elseif t.rpm < CFG.standbyRPM then flow = math.min(CFG.holdFlow, math.max(0, steamLeft)) end
+      end
+      steamLeft = steamLeft - flow
+      if t.coils then setTurbine(t, "setInductorEngaged", "coils", false) end
+      if flow > 0 then
+        if t.flowMax ~= flow then setTurbine(t, "setFluidFlowRateMax", "flowMax", flow) end
+        if not t.active then setTurbine(t, "setActive", "active", true) end
+      elseif t.active then
+        setTurbine(t, "setActive", "active", false)
+      end
+      t.spunUp = false
+      if t.state == "STANDBY" then demand = demand + math.max(flow, CFG.holdFlow) end
     end
   end
   return running, avgBuffer
@@ -329,7 +354,8 @@ local function controlReactor()
     local now = os.clock()
     -- A turbine started or stood down: move the rods by the expected amount straight away, then
     -- give the reactor a few seconds to respond before the controller takes over again.
-    if lastWant and want ~= lastWant then
+    -- (Small changes, like a stood-down turbine's trickle, are left to the controller.)
+    if lastWant and math.abs(want - lastWant) >= CFG.turbineFlow / 2 then
       rods = clamp(rods + (lastWant - want) / CFG.steamPerRod, 0, 100)
       lastSurplus = nil
       settleUntil = now + 3 * CFG.control
