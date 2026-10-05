@@ -1,0 +1,315 @@
+-- domes: a turtle program that builds the glass shells of the Mars base: the turbine dome, the
+-- reactor dome, the sealed hub, and the short tunnel between the hub and the turbine dome.
+-- ComputerCraft 1.63.
+--
+-- Setup
+--  * Flatten the land first. Everything sits on the ground; the ground is the floor.
+--  * Put the turtle ON the ground at the north-west corner of the 4x4-chunk area (on a chunk
+--    corner), facing EAST. The domes are built east (+x) and south (+z) of it.
+--  * Put an Ender Chest (Ender Storage) in slot 16. Fill the matching chest at home with glass and
+--    some coal or charcoal; the turtle takes both from it and puts back the fuel it doesn't need.
+--  * Run "domes". It saves its progress every move and adds itself to "startup", so after a server
+--    restart or chunk unload it carries on where it stopped.
+--
+-- The hub is built first. It has to hold air, so use glass Galacticraft treats as sealed: vanilla
+-- glass, Chisel glass or MineFactory Reloaded's stained glass (not Tinkers' Clear Glass). To use a
+-- different glass on the big domes, set hubGlassPause = true: the turtle then stops after the hub
+-- so you can swap the glass in the Ender Chest.
+
+local CFG = {
+  -- Rectangles, outside edges, in blocks from the turtle's start (x east, z south). Layer 0 is the
+  -- first layer above the ground. Walls go up to wallTop, the roof is one layer above.
+  turbine = { x0 = 0,  z0 = 0,  x1 = 64, z1 = 32, wallTop = 30, deck = 15 },  -- 2 floors of turbines
+  reactor = { x0 = 0,  z0 = 33, x1 = 53, z1 = 53, wallTop = 15 },             -- 3 reactors in a row
+  hub     = { x0 = 54, z0 = 34, x1 = 63, z1 = 63, wallTop = 4 },              -- sealed, 8x28x5 inside
+  -- Doorways left open (3 wide, 3 tall). Put Galacticraft airlocks in the hub's three.
+  openings = {
+    { x = 57, z = 32, w = 3, axis = "x" },  -- turbine dome south wall, to the tunnel
+    { x = 57, z = 34, w = 3, axis = "x" },  -- hub north wall, to the tunnel
+    { x = 53, z = 42, w = 3, axis = "z" },  -- reactor dome east wall, to the hub
+    { x = 54, z = 42, w = 3, axis = "z" },  -- hub west wall, to the reactor dome
+    { x = 57, z = 63, w = 3, axis = "x" },  -- hub south wall, the way in from outside
+  },
+  openingHeight = 3,
+  hubGlassPause = false, -- true: stop after the hub to swap the glass for the big domes
+  minFuel = 500,         -- restock fuel below this
+}
+
+local STATE = "domes.state"
+local CHEST = 16
+
+---------------------------------------------------------------------------------------------------
+-- the plan: every block, in build order
+
+local function isOpening(x, y, z)
+  if y >= CFG.openingHeight then return false end
+  for _, o in ipairs(CFG.openings) do
+    if o.axis == "x" and z == o.z and x >= o.x and x < o.x + o.w then return true end
+    if o.axis == "z" and x == o.x and z >= o.z and z < o.z + o.w then return true end
+  end
+  return false
+end
+
+local function addWall(list, r, y)
+  -- once round the outside, clockwise from the north-west corner
+  local function add(x, z) if not isOpening(x, y, z) then list[#list + 1] = { x, y, z } end end
+  for x = r.x0, r.x1 do add(x, r.z0) end
+  for z = r.z0 + 1, r.z1 do add(r.x1, z) end
+  for x = r.x1 - 1, r.x0, -1 do add(x, r.z1) end
+  for z = r.z1 - 1, r.z0 + 1, -1 do add(r.x0, z) end
+end
+
+local function addFloor(list, r, y, inside)
+  -- a solid layer, row by row (snaking); `inside` leaves out the outer ring (the deck)
+  local a, b = inside and 1 or 0, inside and 1 or 0
+  local flip = false
+  for z = r.z0 + a, r.z1 - a do
+    local from, to, step = r.x0 + b, r.x1 - b, 1
+    if flip then from, to, step = to, from, -1 end
+    for x = from, to, step do list[#list + 1] = { x, y, z } end
+    flip = not flip
+  end
+end
+
+local function addTunnel(list, y)
+  -- the 1-block tunnel between the turbine dome (z 32) and the hub (z 34), round a 3x3 doorway
+  local ox, w, h = 57, 3, CFG.openingHeight
+  if y < h then
+    list[#list + 1] = { ox - 1, y, 33 }
+    list[#list + 1] = { ox + w, y, 33 }
+  elseif y == h then
+    for x = ox - 1, ox + w do list[#list + 1] = { x, y, 33 } end
+  end
+end
+
+local function buildPlan()
+  local plan = {}
+  local hub, tur, rea = CFG.hub, CFG.turbine, CFG.reactor
+  -- 1. the hub, bottom to top
+  for y = 0, hub.wallTop do addWall(plan, hub, y) end
+  addFloor(plan, hub, hub.wallTop + 1)
+  local hubCount = #plan
+  if CFG.hubGlassPause then plan[#plan + 1] = { pause = true } end
+  -- 2. everything else, one layer at a time across all of it, so the turtle can always travel
+  -- one block above the layer it's building without hitting anything
+  for y = 0, tur.wallTop + 1 do
+    if y <= tur.wallTop then addWall(plan, tur, y) else addFloor(plan, tur, y) end
+    if y == tur.deck then addFloor(plan, tur, y, true) end
+    addTunnel(plan, y)
+    if y <= rea.wallTop then addWall(plan, rea, y) elseif y == rea.wallTop + 1 then addFloor(plan, rea, y) end
+  end
+  return plan, hubCount
+end
+
+---------------------------------------------------------------------------------------------------
+-- position and saving
+
+local pos = { x = 0, y = 0, z = 0, f = 0 }  -- f: 0 east (+x), 1 south (+z), 2 west, 3 north
+local nextStep = 1
+
+local function save()
+  local h = fs.open(STATE, "w")
+  h.write(textutils.serialize({ pos = pos, nextStep = nextStep }))
+  h.close()
+end
+
+local function load()
+  if not fs.exists(STATE) then return false end
+  local h = fs.open(STATE, "r")
+  local s = textutils.unserialize(h.readAll())
+  h.close()
+  if type(s) ~= "table" then return false end
+  pos, nextStep = s.pos, s.nextStep
+  return true
+end
+
+local status = ""
+local function say(msg)
+  status = msg
+  print(msg)
+end
+
+---------------------------------------------------------------------------------------------------
+-- fuel and glass
+
+local function fuelLevel()
+  local f = turtle.getFuelLevel()
+  if f == "unlimited" then return math.huge end
+  return f
+end
+
+local function glassCount()
+  local n = 0
+  for s = 1, 15 do n = n + turtle.getItemCount(s) end
+  return n
+end
+
+-- Places the Ender Chest above, takes glass and fuel, burns what fuel it needs, puts the rest of
+-- the fuel back, and picks the chest up again.
+local function restock(wantGlass)
+  turtle.select(CHEST)
+  while not turtle.placeUp() do
+    if turtle.detectUp() then
+      say("Can't place the Ender Chest: something is above me. Clear it, please.")
+    else
+      say("Can't place the Ender Chest from slot 16. Is it there?")
+    end
+    sleep(5)
+    turtle.select(CHEST)
+  end
+  while true do
+    for s = 1, 15 do
+      if turtle.getItemCount(s) == 0 then
+        turtle.select(s)
+        turtle.suckUp()
+      end
+    end
+    -- fuel goes into the turtle (up to what it can hold); spare fuel goes back
+    local limit = turtle.getFuelLimit and turtle.getFuelLimit() or 20000
+    for s = 1, 15 do
+      turtle.select(s)
+      if turtle.getItemCount(s) > 0 and turtle.refuel(0) then
+        while turtle.getItemCount(s) > 0 and fuelLevel() + 80 <= limit do turtle.refuel(1) end
+        if turtle.getItemCount(s) > 0 then turtle.dropUp() end
+      end
+    end
+    if (not wantGlass or glassCount() > 0) and fuelLevel() >= CFG.minFuel then break end
+    say("The Ender Chest needs " .. (glassCount() == 0 and "glass" or "fuel") .. ". Waiting...")
+    sleep(10)
+  end
+  turtle.select(CHEST)
+  turtle.digUp()
+  turtle.select(1)
+end
+
+-- Puts every block back into the Ender Chest (to swap glass types).
+local function emptyIntoChest()
+  turtle.select(CHEST)
+  while not turtle.placeUp() do sleep(5) end
+  for s = 1, 15 do
+    turtle.select(s)
+    if turtle.getItemCount(s) > 0 then turtle.dropUp() end
+  end
+  turtle.select(CHEST)
+  turtle.digUp()
+  turtle.select(1)
+end
+
+---------------------------------------------------------------------------------------------------
+-- moving
+
+local DX = { [0] = 1, 0, -1, 0 }
+local DZ = { [0] = 0, 1, 0, -1 }
+
+local function turnTo(f)
+  while pos.f ~= f do
+    if (pos.f + 1) % 4 == f then turtle.turnRight(); pos.f = f
+    else turtle.turnLeft(); pos.f = (pos.f + 3) % 4 end
+    save()
+  end
+end
+
+local function step(dir)
+  if fuelLevel() < CFG.minFuel then restock(false) end
+  local move, detect, attack = turtle.forward, turtle.detect, turtle.attack
+  if dir == "up" then move, detect, attack = turtle.up, turtle.detectUp, turtle.attackUp
+  elseif dir == "down" then move, detect, attack = turtle.down, turtle.detectDown, turtle.attackDown end
+  while not move() do
+    if detect() then
+      say(string.format("Blocked at %d,%d,%d (going %s). Please clear it.", pos.x, pos.y, pos.z, dir))
+      sleep(5)
+    elseif not attack() then
+      sleep(0.5)   -- a player or something in the way
+    end
+  end
+  if dir == "up" then pos.y = pos.y + 1
+  elseif dir == "down" then pos.y = pos.y - 1
+  else pos.x, pos.z = pos.x + DX[pos.f], pos.z + DZ[pos.f] end
+  save()
+end
+
+-- Goes up first and down last, so it never cuts through what it has built. In the north part
+-- (the turbine dome, z <= 33) it moves east-west first; in the south part it moves north-south
+-- first. That keeps it out of the hub, which sits in the south-east corner.
+local function goTo(x, y, z)
+  while pos.y < y do step("up") end
+  local function moveX()
+    if pos.x ~= x then turnTo(x > pos.x and 0 or 2) end
+    while pos.x ~= x do step("forward") end
+  end
+  local function moveZ()
+    if pos.z ~= z then turnTo(z > pos.z and 1 or 3) end
+    while pos.z ~= z do step("forward") end
+  end
+  if pos.z <= 33 then moveX(); moveZ() else moveZ(); moveX() end
+  while pos.y > y do step("down") end
+end
+
+local function placeBelow()
+  if turtle.detectDown() then return end  -- already there (after a restart)
+  while true do
+    if glassCount() == 0 then restock(true) end
+    local s = turtle.getSelectedSlot and turtle.getSelectedSlot() or nil
+    if not s or s == CHEST or turtle.getItemCount(s) == 0 then
+      for i = 1, 15 do
+        if turtle.getItemCount(i) > 0 then turtle.select(i); break end
+      end
+    end
+    if turtle.placeDown() then return end
+    if turtle.detectDown() then return end
+    turtle.attackDown()
+    sleep(0.5)
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- main
+
+local plan, hubCount = buildPlan()
+local glassTotal = 0
+for _, p in ipairs(plan) do if not p.pause then glassTotal = glassTotal + 1 end end
+
+local resumed = load()
+if not resumed then
+  print("domes: " .. glassTotal .. " glass in all.")
+  print("  Hub (built first, must seal): " .. hubCount)
+  print("  Turbine dome, reactor dome and tunnel: " .. (glassTotal - hubCount))
+  print("Start ON the ground at the north-west corner, facing east, Ender Chest in slot 16.")
+  print("Press Enter to start, or hold Ctrl+T to cancel.")
+  read()
+  save()
+end
+if not fs.exists("startup") then
+  local h = fs.open("startup", "w")
+  h.write('shell.run("domes")\n')
+  h.close()
+end
+
+while nextStep <= #plan do
+  local p = plan[nextStep]
+  if p.pause then
+    say("Hub done. Swap the glass in the Ender Chest for the big domes' glass.")
+    emptyIntoChest()
+    print("Press Enter when the Ender Chest has the new glass.")
+    read()
+  else
+    goTo(p[1], p[2] + 1, p[3])
+    placeBelow()
+    if nextStep % 50 == 0 then
+      print(string.format("%d / %d placed (layer %d), fuel %s", nextStep, #plan, p[2], tostring(turtle.getFuelLevel())))
+    end
+  end
+  nextStep = nextStep + 1
+  save()
+end
+
+-- Park on top of the hub, out of the way.
+goTo(CFG.hub.x0 + 2, CFG.hub.wallTop + 2, CFG.hub.z0 + 2)
+fs.delete(STATE)
+if fs.exists("startup") then
+  local h = fs.open("startup", "r")
+  local s = h.readAll()
+  h.close()
+  if s == 'shell.run("domes")\n' then fs.delete("startup") end
+end
+print("All done. The turtle is parked on the hub's roof.")
