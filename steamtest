@@ -1,0 +1,158 @@
+-- steamtest: measures how fast a fluid (steam) arrives in tanks, read through OpenPeripherals.
+-- ComputerCraft 1.63.
+--
+-- Setup: send the steam into one or more tanks (an Extra Utilities Drum is best: 256,000 mB) that
+-- nothing else drains, and connect them to this computer (directly or with wired modems).
+-- Run "steamtest" to use every tank it finds, or "steamtest <peripheral name>" for one tank.
+-- R resets the measurement (after emptying a full tank), Q quits.
+--
+-- Rates are in mB per game tick, timed with the computer's tick clock, so server lag doesn't skew
+-- them. A line is added to steamtest.log every 10 seconds.
+
+local args = { ... }
+local SAMPLE = 0.5        -- seconds between readings
+local LOG_EVERY = 10      -- seconds between log lines
+local FULL = 0.98         -- tank this full: arriving steam has nowhere to go, rates stop being valid
+local RF_PER_MB = 11.45   -- a Big Reactors turbine (64 blades, Enderium) at 2,000 mB/t: ~22,900 RF/t
+
+local function findTanks()
+  local list = {}
+  for _, name in ipairs(peripheral.getNames()) do
+    if not args[1] or name == args[1] then
+      for _, m in ipairs(peripheral.getMethods(name) or {}) do
+        if m == "getTankInfo" then list[#list + 1] = { name = name, p = peripheral.wrap(name) }; break end
+      end
+    end
+  end
+  return list
+end
+
+-- Total amount and capacity over every tank; the fluid's name if any tank holds some.
+local function read(tanks)
+  local amount, capacity, fluid = 0, 0, nil
+  for _, t in ipairs(tanks) do
+    local ok, info = pcall(t.p.getTankInfo, "unknown")
+    if ok and type(info) == "table" then
+      for _, tk in pairs(info) do
+        if type(tk) == "table" then
+          local a = tonumber(tk.amount) or 0
+          amount = amount + a
+          capacity = capacity + (tonumber(tk.capacity) or 0)
+          if a > 0 and not fluid then fluid = tostring(tk.rawName or tk.name or "?") end
+        end
+      end
+    end
+  end
+  return amount, capacity, fluid
+end
+
+local function commas(n)
+  local s = tostring(math.floor(math.abs(n) + 0.5))
+  local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  if out:sub(1, 1) == "," then out = out:sub(2) end
+  return (n < 0 and "-" or "") .. out
+end
+
+local tanks = findTanks()
+if #tanks == 0 then
+  print("No tanks found. Connect a tank (e.g. an Extra Utilities Drum) to this computer,")
+  print("directly or with a wired modem, and check OpenPeripherals sees it.")
+  return
+end
+
+local samples, first, startAmount, startTime, lastLog, peak
+local frozen = false
+local function reset()
+  frozen = false
+  local a = read(tanks)
+  local now = os.clock()
+  first = { t = now, a = a }
+  samples = { first }
+  startAmount, startTime, lastLog, peak = a, now, now, 0
+end
+reset()
+
+-- mB/t over the last `window` seconds (or the whole run); nil until there's a span to measure.
+local function rate(window)
+  local now = samples[#samples]
+  local old = first
+  if window then
+    old = samples[1]
+    for i = #samples, 1, -1 do
+      old = samples[i]
+      if now.t - samples[i].t >= window then break end
+    end
+  end
+  local dt = now.t - old.t
+  if dt <= 0 then return nil end
+  return (now.a - old.a) / (dt * 20)
+end
+
+local function fmt(r) return r and (commas(r) .. " mB/t") or "measuring..." end
+
+local function draw(amount, capacity, fluid)
+  local r10, r60, rAll = rate(10), rate(60), rate(nil)
+  if r10 and r10 > peak then peak = r10 end
+  term.clear(); term.setCursorPos(1, 1)
+  print("steamtest - " .. #tanks .. " tank(s): " .. tanks[1].name .. (#tanks > 1 and ", ..." or ""))
+  print("Fluid:     " .. (fluid or "(empty)"))
+  print("In tanks:  " .. commas(amount) .. " / " .. commas(capacity) .. " mB")
+  print("Running:   " .. commas(samples[#samples].t - startTime) .. " s, gained " .. commas(amount - startAmount) .. " mB")
+  print("")
+  print("Last 10 s: " .. fmt(r10))
+  print("Last 60 s: " .. fmt(r60))
+  print("Whole run: " .. fmt(rAll))
+  print("Peak 10 s: " .. commas(peak) .. " mB/t")
+  print("")
+  local r = r60 or rAll or 0
+  print("= " .. (math.floor(r / 200 + 0.5) / 10) .. " Big Reactors turbines' worth (2,000 mB/t each)")
+  print("= ~" .. commas(r * RF_PER_MB) .. " RF/t through BR turbines")
+  if capacity > 0 and amount >= capacity * FULL then
+    print("")
+    print("TANK FULL - measuring stopped; the rates above are")
+    print("from before it filled. Empty it, then press R.")
+  end
+  print("")
+  print("R = restart, Q = quit. Log: steamtest.log")
+end
+
+local function log(amount)
+  local h = fs.open("steamtest.log", "a")
+  if not h then return end
+  local r10, r60, rAll = rate(10), rate(60), rate(nil)
+  h.writeLine(string.format("%6ds  %10s mB  10s %8s  60s %8s  all %8s",
+    math.floor(samples[#samples].t - startTime), commas(amount), commas(r10 or 0), commas(r60 or 0), commas(rAll or 0)))
+  h.close()
+end
+
+local timer = os.startTimer(SAMPLE)
+while true do
+  local event, p1 = os.pullEvent()
+  if event == "timer" and p1 == timer then
+    local amount, capacity, fluid = read(tanks)
+    local now = os.clock()
+    local full = capacity > 0 and amount >= capacity * FULL
+    -- Once the tanks are full nothing more can arrive, so readings stop there and the rates
+    -- shown are the ones measured up to that point.
+    -- (The reading that finds the tanks full is left out too: it filled partway through it.)
+    if not full then
+      samples[#samples + 1] = { t = now, a = amount }
+      -- keep just over a minute of readings (the whole-run rate uses `first`)
+      while #samples > 2 and now - samples[2].t >= 61 do table.remove(samples, 1) end
+      if now - lastLog >= LOG_EVERY then log(samples[#samples].a); lastLog = now end
+    elseif not frozen then
+      log(samples[#samples].a)
+    end
+    frozen = full
+    draw(amount, capacity, fluid)
+    timer = os.startTimer(SAMPLE)
+  elseif event == "char" and (p1 == "r" or p1 == "R") then
+    reset()
+    local h = fs.open("steamtest.log", "a")
+    if h then h.writeLine("--- restarted ---"); h.close() end
+  elseif event == "char" and (p1 == "q" or p1 == "Q") then
+    term.clear(); term.setCursorPos(1, 1)
+    print("steamtest stopped. Results are in steamtest.log")
+    return
+  end
+end
