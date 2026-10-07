@@ -152,6 +152,11 @@ end
 
 local function placeChest()
   turtle.select(CHEST)
+  -- after a restart mid-restock the chest is still up there: use it
+  if turtle.getItemCount(CHEST) == 0 and turtle.detectUp() then
+    local p = peripheral.wrap("top")
+    if p and p.getAllStacks then return p end
+  end
   while not turtle.placeUp() do
     say(turtle.detectUp() and "Can't place the Ender Chest: something is above me."
                           or "Can't place the Ender Chest from slot 16. Is it there?")
