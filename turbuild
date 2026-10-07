@@ -1,0 +1,469 @@
+-- turbuild: a turtle program that builds the Mars base's Big Reactors turbines (7x7x13: 64 blades,
+-- 24 Enderium, glass walls, ports on top). ComputerCraft 1.63 + OpenPeripherals.
+--
+-- The turtle can't tell items apart by itself, so it reads its Ender Chest through OpenPeripherals
+-- and pulls exactly the parts it needs into its own slots.
+--
+-- Usage
+--   turbuild learn   once: learns the 10 parts from Ender Chest slots 1-10 (see the README section)
+--   turbuild 1       builds the turbines of floor 1 (columns 3-8; columns 1-2 are already built)
+--   turbuild 2       builds the turbines of floor 2 (all 8 columns)
+-- It saves its progress after every move and adds itself to "startup", so after a server restart
+-- it carries on where it stopped.
+--
+-- Coordinates in here are blocks from the base's north-west corner (world x 928, y 95, z 608):
+-- x east, z south, y up (0 = the first layer above the floor).
+
+local args = { ... }
+
+local PARTS = { "housing", "glass", "bearing", "shaft", "blade", "enderium",
+                "controller", "powertap", "fluidport", "computerport" }
+local LABEL = {
+  housing = "Turbine Housing", glass = "Turbine Glass", bearing = "Rotor Bearing",
+  shaft = "Rotor Shaft", blade = "Rotor Blade", enderium = "Enderium Block",
+  controller = "Turbine Controller", powertap = "Power Tap", fluidport = "Fluid Port",
+  computerport = "Computer Port",
+}
+-- Turtle slots for each part (slot 16 holds the Ender Chest).
+local SLOTS = {
+  housing = { 1, 2, 3 }, glass = { 4, 5, 6, 7 }, blade = { 8 }, enderium = { 9 }, shaft = { 10 },
+  bearing = { 11 }, controller = { 12 }, powertap = { 13 }, fluidport = { 14 }, computerport = { 15 },
+}
+local CHEST = 16
+local PARTS_FILE, STATE_FILE = "turbuild.parts", "turbuild.state"
+local MIN_FUEL = 500
+
+local FLOORS = {
+  -- base: the layer the turbines stand on. start: where the turtle is placed (in the gap
+  -- between columns 2 and 3, row 1), facing east.
+  [1] = { base = 0, columns = { 2, 3, 4, 5, 6, 7 }, start = { 16, 0, 4 } },
+  [2] = { base = 16, columns = { 0, 1, 2, 3, 4, 5, 6, 7 }, start = { 16, 16, 4 } },
+}
+local GAP_ROWS = { 8, 16, 24 }   -- the gaps between turbine rows (z)
+
+---------------------------------------------------------------------------------------------------
+-- the turbine design
+
+-- The part at (i, k, j) of a turbine: i east and j south (0-6), k up (0-12). nil = air.
+local function turbinePart(i, j, k)
+  if k == 0 then return (i == 3 and j == 3) and "bearing" or "housing" end
+  if k == 12 then
+    if j == 3 and (i == 1 or i == 3) then return "fluidport" end  -- steam in (west), water out (centre)
+    if i == 3 and j == 1 then return "powertap" end                 -- north of centre
+    if i == 5 and j == 3 then return "computerport" end             -- east of centre
+    if i == 3 and j == 5 then return "controller" end               -- south of centre
+    return "housing"
+  end
+  local edges = ((i == 0 or i == 6) and 1 or 0) + ((j == 0 or j == 6) and 1 or 0)
+  if edges == 2 then return "housing" end   -- the four vertical frame edges
+  if edges == 1 then return "glass" end     -- side walls
+  local di, dj = math.abs(i - 3), math.abs(j - 3)
+  if di == 0 and dj == 0 then return "shaft" end
+  if k <= 8 then
+    if (di == 0 and dj <= 2) or (dj == 0 and di <= 2) then return "blade" end
+  else
+    if di <= 1 and dj <= 1 then return "enderium" end
+  end
+  return nil
+end
+
+-- Every turbine to build on a floor, with its blocks in build order (bottom up, snaking).
+local function buildJobs(floorNo)
+  local F = FLOORS[floorNo]
+  local jobs = {}
+  for _, c in ipairs(F.columns) do
+    for row = 0, 3 do
+      local x0, z0 = 1 + 8 * c, 1 + 8 * row
+      local J = { x0 = x0, z0 = z0, y0 = F.base, zc = z0 + 3, cells = {} }
+      -- the gap the turtle uses to come and go: east of the turbine, or west for the last column
+      J.cx = (c <= 6) and (x0 + 7) or (x0 - 1)
+      J.edge = (J.cx > x0) and (x0 + 6) or x0
+      local flip = false
+      for k = 0, 12 do
+        for jj = 0, 6 do
+          local j = flip and (6 - jj) or jj
+          for ii = 0, 6 do
+            local i = ((jj % 2 == 1) ~= flip) and (6 - ii) or ii
+            local part = turbinePart(i, j, k)
+            if part then J.cells[#J.cells + 1] = { x0 + i, F.base + k, z0 + j, part } end
+          end
+        end
+        flip = not flip
+      end
+      jobs[#jobs + 1] = J
+    end
+  end
+  return jobs
+end
+
+---------------------------------------------------------------------------------------------------
+-- saving and messages
+
+local st = { floor = nil, job = 1, cell = 1, pos = nil }
+local pos
+
+local function save()
+  local h = fs.open(STATE_FILE, "w")
+  h.write(textutils.serialize(st))
+  h.close()
+end
+
+local function load()
+  if not fs.exists(STATE_FILE) then return false end
+  local h = fs.open(STATE_FILE, "r")
+  local s = textutils.unserialize(h.readAll())
+  h.close()
+  if type(s) ~= "table" or not s.pos then return false end
+  st = s
+  pos = st.pos
+  return true
+end
+
+local function say(msg) print(msg) end
+
+---------------------------------------------------------------------------------------------------
+-- parts: learning them, and pulling them from the Ender Chest
+
+local partIds = {}   -- part -> { id = , dmg = }
+
+local function loadParts()
+  if not fs.exists(PARTS_FILE) then return false end
+  local h = fs.open(PARTS_FILE, "r")
+  partIds = textutils.unserialize(h.readAll()) or {}
+  h.close()
+  for _, p in ipairs(PARTS) do if not partIds[p] then return false end end
+  return true
+end
+
+local function partOf(stack)
+  if type(stack) ~= "table" then return nil end
+  for _, p in ipairs(PARTS) do
+    local id = partIds[p]
+    if id and id.id == stack.id and id.dmg == stack.dmg then return p end
+  end
+  return nil
+end
+
+local function fuelLevel()
+  local f = turtle.getFuelLevel()
+  if f == "unlimited" then return math.huge end
+  return f
+end
+
+local function placeChest()
+  turtle.select(CHEST)
+  while not turtle.placeUp() do
+    say(turtle.detectUp() and "Can't place the Ender Chest: something is above me."
+                          or "Can't place the Ender Chest from slot 16. Is it there?")
+    sleep(5)
+    turtle.select(CHEST)
+  end
+  local chest
+  for _ = 1, 20 do
+    chest = peripheral.wrap("top")
+    if chest and chest.getAllStacks then return chest end
+    sleep(0.1)
+  end
+  error("The Ender Chest above me isn't readable. Is OpenPeripherals installed?")
+end
+
+local function pickUpChest()
+  turtle.select(CHEST)
+  turtle.digUp()
+  turtle.select(1)
+end
+
+-- The chest's stacks by slot number (1-based, as pushItem expects).
+local function stacksOf(chest)
+  local ok, all = pcall(chest.getAllStacks)
+  if not ok or type(all) ~= "table" then return {} end
+  if all[0] == nil then return all end
+  local shifted = {}
+  for k, v in pairs(all) do shifted[k + 1] = v end
+  return shifted
+end
+
+local function emptySlot()
+  for s = 1, 15 do if turtle.getItemCount(s) == 0 then return s end end
+  return nil
+end
+
+-- Burns fuel from the chest until the turtle has plenty, putting spare fuel back.
+local function refuelFrom(chest)
+  local limit = turtle.getFuelLimit and turtle.getFuelLimit() or 20000
+  local notFuel = {}
+  local tries = 0
+  while fuelLevel() < limit - 1000 and tries < 30 do
+    tries = tries + 1
+    local slot = emptySlot()
+    if not slot then
+      -- make room: put the last housing slot back for a moment
+      turtle.select(3); turtle.dropUp()
+      slot = 3
+    end
+    local found = false
+    for cs, stack in pairs(stacksOf(chest)) do
+      if type(stack) == "table" and not partOf(stack) and not notFuel[stack.id .. ":" .. stack.dmg] then
+        found = true
+        chest.pushItem("down", cs, 64, slot)
+        turtle.select(slot)
+        if turtle.refuel(0) then
+          -- burn one to see what each is worth (coal 80, a coal block 800), then only as many
+          -- as fit under the limit, so nothing is wasted
+          local before = fuelLevel()
+          turtle.refuel(1)
+          local each = math.max(1, fuelLevel() - before)
+          while turtle.getItemCount(slot) > 0 and fuelLevel() + each <= limit do
+            if not turtle.refuel(1) then break end
+          end
+        else
+          notFuel[stack.id .. ":" .. stack.dmg] = true
+        end
+        if turtle.getItemCount(slot) > 0 then turtle.dropUp() end
+        break
+      end
+    end
+    if not found then break end
+  end
+end
+
+-- Fills every part slot from the chest (and fuel), waiting while `need` is missing.
+local function restock(need)
+  local chest = placeChest()
+  while true do
+    if fuelLevel() < MIN_FUEL * 4 then refuelFrom(chest) end
+    local stacks = stacksOf(chest)
+    for _, p in ipairs(PARTS) do
+      for _, ts in ipairs(SLOTS[p]) do
+        local have = turtle.getItemCount(ts)
+        if have < 64 then
+          for cs, stack in pairs(stacks) do
+            if have >= 64 then break end
+            if partOf(stack) == p and (stack.qty or 0) > 0 then
+              local moved = chest.pushItem("down", cs, 64 - have, ts) or 0
+              have = have + moved
+              stack.qty = (stack.qty or 0) - moved
+            end
+          end
+        end
+      end
+    end
+    local haveNeed = false
+    for _, ts in ipairs(SLOTS[need] or {}) do if turtle.getItemCount(ts) > 0 then haveNeed = true end end
+    if (not need or haveNeed) and fuelLevel() >= MIN_FUEL then break end
+    say("The Ender Chest needs " .. (need and not haveNeed and LABEL[need] or "fuel (coal)") .. ". Waiting...")
+    sleep(10)
+  end
+  pickUpChest()
+end
+
+---------------------------------------------------------------------------------------------------
+-- moving
+
+local DX = { [0] = 1, 0, -1, 0 }
+local DZ = { [0] = 0, 1, 0, -1 }
+
+local function turnTo(f)
+  while pos.f ~= f do
+    if (pos.f + 1) % 4 == f then turtle.turnRight(); pos.f = f
+    else turtle.turnLeft(); pos.f = (pos.f + 3) % 4 end
+    save()
+  end
+end
+
+local function step(dir)
+  if fuelLevel() < MIN_FUEL then restock(nil) end
+  local move, detect, attack = turtle.forward, turtle.detect, turtle.attack
+  if dir == "up" then move, detect, attack = turtle.up, turtle.detectUp, turtle.attackUp
+  elseif dir == "down" then move, detect, attack = turtle.down, turtle.detectDown, turtle.attackDown end
+  local waited = 0
+  while not move() do
+    if detect() then
+      say(string.format("Blocked at %d,%d,%d (world %d,%d,%d) going %s. Please clear it.",
+        pos.x, pos.y, pos.z, pos.x + 928, pos.y + 95, pos.z + 608, dir))
+      sleep(5)
+    elseif not attack() then
+      sleep(0.5)
+    end
+    waited = waited + 1
+  end
+  if dir == "up" then pos.y = pos.y + 1
+  elseif dir == "down" then pos.y = pos.y - 1
+  else pos.x, pos.z = pos.x + DX[pos.f], pos.z + DZ[pos.f] end
+  save()
+end
+
+local function moveX(x) if pos.x ~= x then turnTo(x > pos.x and 0 or 2) end; while pos.x ~= x do step("forward") end end
+local function moveZ(z) if pos.z ~= z then turnTo(z > pos.z and 1 or 3) end; while pos.z ~= z do step("forward") end end
+local function moveY(y) while pos.y < y do step("up") end; while pos.y > y do step("down") end end
+
+local function inside(J, p)
+  return p.x >= J.x0 and p.x <= J.x0 + 6 and p.z >= J.z0 and p.z <= J.z0 + 6 and p.y >= J.y0
+end
+
+-- Travels through the gaps between turbines at height y from one gap column to another.
+local function travel(cx, y, cz)
+  if pos.x ~= cx then
+    local best, bestCost
+    for _, gz in ipairs(GAP_ROWS) do
+      local cost = math.abs(pos.z - gz) + math.abs(cz - gz)
+      if not bestCost or cost < bestCost then best, bestCost = gz, cost end
+    end
+    moveZ(best)
+    moveX(cx)
+  end
+  moveZ(cz)
+end
+
+-- From inside a finished (or half-built) turbine, out through its gap and down to travel height.
+local function leave(jobs, travelY)
+  for _, J in ipairs(jobs) do
+    if inside(J, pos) then
+      moveZ(J.zc)     -- across the turbine at the current height, above everything built
+      moveX(J.cx)     -- out into the gap
+      moveY(travelY)
+      return
+    end
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- placing
+
+local function placeDown(part)
+  if turtle.detectDown() then return end   -- already there (after a restart)
+  for _ = 1, 100 do
+    local slot
+    for _, ts in ipairs(SLOTS[part]) do if turtle.getItemCount(ts) > 0 then slot = ts; break end end
+    if not slot then
+      restock(part)
+    else
+      turtle.select(slot)
+      if turtle.placeDown() or turtle.detectDown() then return end
+      turtle.attackDown()
+      sleep(0.5)
+    end
+  end
+  error(string.format("Couldn't place %s at %d,%d,%d.", LABEL[part], pos.x, pos.y - 1, pos.z))
+end
+
+---------------------------------------------------------------------------------------------------
+-- learn mode
+
+local function learn()
+  print("Learning the parts from the Ender Chest (slots 1-10, in this order):")
+  for i, p in ipairs(PARTS) do print(string.format("  %2d  %s", i, LABEL[p])) end
+  local chest = placeChest()
+  local stacks = stacksOf(chest)
+  local learned, problems = {}, {}
+  for i, p in ipairs(PARTS) do
+    local s = stacks[i]
+    if type(s) ~= "table" then
+      problems[#problems + 1] = "slot " .. i .. " (" .. LABEL[p] .. ") is empty"
+    else
+      learned[p] = { id = s.id, dmg = s.dmg, name = s.name }
+    end
+  end
+  for a = 1, #PARTS do
+    for b = a + 1, #PARTS do
+      local la, lb = learned[PARTS[a]], learned[PARTS[b]]
+      if la and lb and la.id == lb.id and la.dmg == lb.dmg then
+        problems[#problems + 1] = LABEL[PARTS[a]] .. " and " .. LABEL[PARTS[b]] .. " are the same item"
+      end
+    end
+  end
+  pickUpChest()
+  if #problems > 0 then
+    print("Not learned:")
+    for _, m in ipairs(problems) do print("  " .. m) end
+    return
+  end
+  local h = fs.open(PARTS_FILE, "w")
+  h.write(textutils.serialize(learned))
+  h.close()
+  print("Learned:")
+  for _, p in ipairs(PARTS) do
+    local l = learned[p]
+    print(string.format("  %-14s %d:%d  %s", LABEL[p], l.id, l.dmg, tostring(l.name or "")))
+  end
+  print("Check the names above match, then run turbuild 1 or turbuild 2.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- main
+
+if args[1] == "learn" then learn(); return end
+
+local resumed = load()
+if not resumed then
+  local floorNo = tonumber(args[1])
+  if not FLOORS[floorNo] then
+    print("Usage: turbuild learn | turbuild 1 | turbuild 2")
+    return
+  end
+  if not loadParts() then
+    print("Run 'turbuild learn' first (see the instructions).")
+    return
+  end
+  local F = FLOORS[floorNo]
+  local s = F.start
+  print(string.format("Floor %d: place me ON %s at world x %d, y %d, z %d, facing EAST.",
+    floorNo, floorNo == 1 and "the floor" or "the middle floor (deck)", s[1] + 928, s[2] + 95, s[3] + 608))
+  print("Ender Chest in slot 16. Press Enter to start, Ctrl+T to cancel.")
+  read()
+  st = { floor = floorNo, job = 1, cell = 1, pos = { x = s[1], y = s[2], z = s[3], f = 0 } }
+  pos = st.pos
+  save()
+else
+  loadParts()
+end
+if not fs.exists("startup") then
+  local h = fs.open("startup", "w")
+  h.write('shell.run("turbuild")\n')
+  h.close()
+end
+
+local jobs = buildJobs(st.floor)
+local travelY = FLOORS[st.floor].base + 1
+local total = 0
+for _, J in ipairs(jobs) do total = total + #J.cells end
+
+-- start: rise from the floor into the travel height (the start spot is in a gap)
+if pos.y < travelY and not inside(jobs[st.job] or jobs[1], pos) then moveY(travelY) end
+
+while st.job <= #jobs do
+  local J = jobs[st.job]
+  if not inside(J, pos) then
+    leave(jobs, travelY)
+    if pos.y ~= travelY then moveY(travelY) end
+    travel(J.cx, travelY, J.zc)
+    moveX(J.edge)          -- one step into the turbine's footprint, at its first layer + 1
+  end
+  for c = st.cell, #J.cells do
+    local cell = J.cells[c]
+    local y = cell[2] + 1
+    moveY(y)               -- only ever up inside a turbine: everything below is built
+    moveX(cell[1]); moveZ(cell[3])
+    placeDown(cell[4])
+    st.cell = c + 1
+    save()
+  end
+  print(string.format("Turbine %d of %d done (column %d, row %d).",
+    st.job, #jobs, (J.x0 - 1) / 8 + 1, (J.z0 - 1) / 8 + 1))
+  st.job, st.cell = st.job + 1, 1
+  save()
+end
+
+-- park in the gap next to the start
+leave(jobs, travelY)
+moveY(travelY)
+travel(FLOORS[st.floor].start[1], travelY, FLOORS[st.floor].start[3])
+moveY(FLOORS[st.floor].start[2])
+fs.delete(STATE_FILE)
+if fs.exists("startup") then
+  local h = fs.open("startup", "r")
+  local s = h.readAll()
+  h.close()
+  if s == 'shell.run("turbuild")\n' then fs.delete("startup") end
+end
+print("All turbines on floor " .. st.floor .. " are built. I'm parked where I started.")
