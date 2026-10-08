@@ -3,10 +3,48 @@
 --
 -- Setup: put the relay's key in a file called "brlink.key" on this computer
 -- (edit brlink.key, paste it with Ctrl+V, then Ctrl > Save > Enter, and Ctrl > Exit > Enter).
--- Run "linktest": it sends a test report named after this computer, reads back everything the
--- relay holds, and shows how long each step took.
+-- Run "linktest": it reads the relay, sends a test report named after this computer, then reads
+-- everything back, showing how long each step took. Each step gives up after TIMEOUT seconds.
 
 local URL = "https://brlink.tailbdc4d5.ts.net"
+local TIMEOUT = 20
+
+-- One request, without hanging forever (CC 1.63's http.get/post have no timeout).
+-- Returns the response body, or nil and what went wrong.
+local function request(url, body, headers)
+  local ok, err = pcall(http.request, url, body, headers)
+  if not ok then return nil, "refused by this computer: " .. tostring(err) end
+  local timer = os.startTimer(TIMEOUT)
+  while true do
+    local event, p1, p2 = os.pullEvent()
+    if event == "http_success" and p1 == url then
+      local text = p2.readAll()
+      p2.close()
+      return text or ""
+    elseif event == "http_failure" and p1 == url then
+      return nil, "failed (connection error, or the relay said no)"
+    elseif event == "timer" and p1 == timer then
+      return nil, "no answer after " .. TIMEOUT .. " s"
+    end
+  end
+end
+
+local function step(what, url, body, headers)
+  write(what .. "... ")
+  local t0 = os.clock()
+  local text, err = request(url, body, headers)
+  if text then
+    print("ok (" .. math.floor((os.clock() - t0) * 100 + 0.5) / 100 .. " s)")
+  else
+    print(err)
+  end
+  return text
+end
+
+if not http then
+  print("The http API is off on this server.")
+  return
+end
 
 local h = fs.open("brlink.key", "r")
 if not h then
@@ -16,41 +54,38 @@ end
 local key = (h.readAll() or ""):gsub("%s", "")
 h.close()
 
+-- 1: a plain read, no key: does the server reach the relay at all?
+if not step("1. Reaching the relay", URL .. "/health") then
+  print("")
+  print("This server can't reach " .. URL)
+  print("Screenshot this and send it over.")
+  return
+end
+
+-- 2: send a test report with the key
 local name = "test-" .. os.getComputerID()
 local report = textutils.serialize({
   test = true, computer = os.getComputerID(), label = os.getComputerLabel(),
   day = os.day(), time = os.time(), clock = os.clock(),
 })
-
-print("Sending a test report as " .. name .. "...")
-local t0 = os.clock()
-local r = http.post(URL .. "/report/" .. name, report, { ["X-Key"] = key })
-if not r then
-  print("FAILED to send. Either the server can't reach the relay,")
-  print("or the key is wrong (the relay refuses bad keys).")
-  print("Trying a plain read to tell which...")
-else
-  print("Sent: " .. tostring(r.readAll()) .. string.format(" (%.2f s)", os.clock() - t0))
-  r.close()
+local sent = step("2. Sending a report as " .. name, URL .. "/report/" .. name, report, { ["X-Key"] = key })
+if not sent then
+  print("   The relay is reachable, so the key is probably wrong.")
 end
 
-t0 = os.clock()
-r = http.get(URL .. "/status")
-if not r then
-  print("FAILED to read " .. URL .. "/status: the server can't reach the relay.")
-  return
-end
-local status = textutils.unserialize(r.readAll())
-r.close()
-print(string.format("Read the relay (%.2f s).", os.clock() - t0))
+-- 3: read everything back
+local text = step("3. Reading it back", URL .. "/status")
+local status = text and textutils.unserialize(text)
 if type(status) ~= "table" or type(status.sources) ~= "table" then
-  print("...but couldn't understand what came back.")
+  if text then print("   ...but couldn't understand what came back.") end
   return
 end
 local any = false
 for n, s in pairs(status.sources) do
   any = true
-  print(string.format("  %-16s %6.1f s old", n, s.age or -1))
+  print(string.format("   %-16s %6.1f s old", n, s.age or -1))
 end
-if not any then print("  (no reports yet)") end
-print("The link works if your " .. name .. " is listed above.")
+if not any then print("   (no reports yet)") end
+if sent and status.sources[name] then
+  print("The link works!")
+end
