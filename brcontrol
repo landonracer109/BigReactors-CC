@@ -11,7 +11,7 @@
 -- when the power is needed again. Stood-down turbines are kept at speed with their coils off,
 -- so they make full power as soon as they're back.
 
-local VERSION = "v8.4"
+local VERSION = "v8.5"
 -- the GitHub commit this copy came from, written by the update program (nil if installed by hand)
 local COMMIT = nil
 do
@@ -128,7 +128,7 @@ local function scan()
     if kind == "BigReactors-Reactor" and not newReactor then
       newReactor, newReactorName = peripheral.wrap(name), name
     elseif kind == "BigReactors-Turbine" then
-      local t = oldTurbines[name] or { name = name, standby = false, spunUp = false }
+      local t = oldTurbines[name] or { name = name, standby = false, spunUp = false, fresh = true }
       t.p = peripheral.wrap(name)
       if not t.ventSet then
         -- "Vent overflow" (Big Reactors' default): if the water can't go back fast enough, the
@@ -281,6 +281,13 @@ local function controlTurbines(now)
   -- (a Tesseract drains senders one after another, not evenly). At most one turbine stands down
   -- per CFG.standDownWait seconds, so the reactor eases down instead of dropping all at once.
   for _, t in ipairs(turbines) do
+    -- A turbine seen for the first time (after a restart or update) whose power buffer is already
+    -- full goes straight to standby, rather than starting as running and being stood down one at
+    -- a time while the reactor ramps up for turbines that aren't needed.
+    if t.ok and t.fresh then
+      t.standby = t.buffer >= CFG.bufferHigh
+      t.fresh = nil
+    end
     if t.ok and t.standby and t.buffer < CFG.bufferLow then t.standby = false end
   end
   if now - lastStandChange >= CFG.standDownWait then
