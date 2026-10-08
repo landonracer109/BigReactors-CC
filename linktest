@@ -68,7 +68,8 @@ local report = textutils.serialize({
   test = true, computer = os.getComputerID(), label = os.getComputerLabel(),
   day = os.day(), time = os.time(), clock = os.clock(),
 })
-local sent = step("2. Sending a report as " .. name, URL .. "/report/" .. name, report, { ["X-Key"] = key })
+-- the key goes on the first line: CC 1.63 can't send headers with a POST (the request dies and hangs)
+local sent = step("2. Sending a report as " .. name, URL .. "/report/" .. name, key .. "\n" .. report)
 if not sent then
   print("   The relay is reachable, so the key is probably wrong.")
 end
