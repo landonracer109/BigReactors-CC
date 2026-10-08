@@ -11,7 +11,7 @@
 -- when the power is needed again. Stood-down turbines are kept at speed with their coils off,
 -- so they make full power as soon as they're back.
 
-local VERSION = "v8.3"
+local VERSION = "v8.4"
 -- the GitHub commit this copy came from, written by the update program (nil if installed by hand)
 local COMMIT = nil
 do
@@ -400,7 +400,10 @@ local function controlReactor()
     local step = clamp((0.5 * (surplus - prev) + 0.2 * CFG.control * surplus) / CFG.steamPerRod, -2, 2)
     lastSurplus = surplus
     if now < settleUntil then step = 0 end
-    local water = R.waterMax > 0 and R.water / R.waterMax or 0
+    -- The water reading can be taken right after the reactor boiled this tick's steam and before
+    -- the turbines' water comes back, so a full tank reads as (tank - steam made). What was in the
+    -- tank before boiling is water + steam made: a real shortage shows as that falling short.
+    local water = R.waterMax > 0 and math.min(1, (R.water + R.steamMade) / R.waterMax) or 0
     if water < 0.05 then
       step = 1
       controlNote = "OUT OF WATER: rods in"
