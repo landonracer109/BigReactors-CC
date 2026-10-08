@@ -1,0 +1,675 @@
+-- dashboard: shows every reactor and turbine that reports to the brlink relay, on three monitor
+-- walls. ComputerCraft 1.63 (Advanced Monitors for colour).
+--
+--   main wall      total power (Mars + Earth), spare capacity, fuel for every reactor
+--   reactors wall  one panel per reactor
+--   turbines wall  every turbine, grouped by reactor
+--
+-- Setup: connect the three monitor walls to this computer (a wired modem on one block of each
+-- wall, turned red, plus networking cable). Save this as "startup" and run it: the first time it
+-- asks you to touch each wall in turn. "dashboard setup" asks again.
+-- It only reads from the relay, so this computer doesn't need a brlink.key.
+
+local RELAY = "https://brlink.tailbdc4d5.ts.net"
+local REFRESH = 5            -- seconds between reads of the relay
+local TIMEOUT = 20           -- seconds before a read counts as failed
+local STALE = 30             -- seconds without a report before a controller shows as not reporting
+local TURBINE_RF = 22900     -- RF/t of one turbine at full steam (for spare capacity)
+local WALLS_FILE = "dashboard.walls"
+
+-- The order and names the reactors are shown with. Anything else reporting is added after them.
+local SOURCES = {
+  { name = "Home",     label = "Earth",  where = "Earth" },
+  { name = "ReactorA", label = "Mars A", where = "Mars" },
+  { name = "ReactorB", label = "Mars B", where = "Mars" },
+  { name = "ReactorC", label = "Mars C", where = "Mars" },
+}
+
+local args = { ... }
+
+---------------------------------------------------------------------------------------------------
+-- helpers
+
+local function clamp(v, lo, hi) if v < lo then return lo elseif v > hi then return hi end return v end
+
+local function commas(n)
+  local s = tostring(math.floor(math.abs(n) + 0.5))
+  local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  if out:sub(1, 1) == "," then out = out:sub(2) end
+  return (n < 0 and "-" or "") .. out
+end
+
+-- n with `places` decimals. (ComputerCraft 1.63's string.format ignores "%.2f" precision.)
+local function dec(n, places)
+  local scale = 10 ^ places
+  local v = math.floor(math.abs(n) * scale + 0.5)
+  local whole = math.floor(v / scale)
+  local frac = tostring(v - whole * scale)
+  frac = string.rep("0", places - #frac) .. frac
+  return (n < 0 and v > 0 and "-" or "") .. commas(whole) .. (places > 0 and ("." .. frac) or "")
+end
+
+local function short(n)
+  local a = math.abs(n)
+  if a >= 1e9 then return dec(n / 1e9, 2) .. "G" end
+  if a >= 1e6 then return dec(n / 1e6, 2) .. "M" end
+  if a >= 1e4 then return dec(n / 1e3, 1) .. "k" end
+  return commas(n)
+end
+
+local function pct(f) return string.format("%d%%", math.floor(clamp(f, 0, 9.99) * 100 + 0.5)) end
+local function round(n, step) return math.floor(n / step + 0.5) * step end
+local function num(v) return tonumber(v) or 0 end
+
+local function duration(seconds)
+  if seconds >= 86400 * 365 then return "over a year" end
+  local d = math.floor(seconds / 86400)
+  local h = math.floor(seconds % 86400 / 3600)
+  local m = math.floor(seconds % 3600 / 60)
+  if d > 0 then return d .. "d " .. h .. "h" end
+  if h > 0 then return h .. "h " .. m .. "m" end
+  return m .. "m"
+end
+
+---------------------------------------------------------------------------------------------------
+-- canvas: drawn in memory, then only the characters that changed are sent to the monitor
+
+local HEX = "0123456789abcdef"
+local function colourOf(c) local i = HEX:find(c, 1, true); return 2 ^ (i - 1) end
+local C = { white = "0", orange = "1", yellow = "4", lime = "5", grey = "7", lightGrey = "8",
+            cyan = "9", blue = "b", green = "d", red = "e", black = "f", lightBlue = "3", purple = "a" }
+
+local function newCanvas(w, h, colour)
+  return { w = w, h = h, colour = colour, text = {}, fg = {}, bg = {}, shown = {} }
+end
+
+local function cvClear(cv, bg)
+  for y = 1, cv.h do
+    local t, f, b = {}, {}, {}
+    for x = 1, cv.w do t[x] = " "; f[x] = C.white; b[x] = bg or C.black end
+    cv.text[y], cv.fg[y], cv.bg[y] = t, f, b
+  end
+end
+
+local function cvWrite(cv, x, y, s, fg, bg)
+  if y < 1 or y > cv.h then return end
+  s = tostring(s)
+  for i = 1, #s do
+    local cx = x + i - 1
+    if cx >= 1 and cx <= cv.w then
+      cv.text[y][cx] = s:sub(i, i)
+      if fg then cv.fg[y][cx] = fg end
+      if bg then cv.bg[y][cx] = bg end
+    end
+  end
+end
+
+local function cvFill(cv, x, y, w, h, bg)
+  for yy = y, y + h - 1 do
+    if yy >= 1 and yy <= cv.h then
+      for xx = x, x + w - 1 do
+        if xx >= 1 and xx <= cv.w then cv.text[yy][xx] = " "; cv.bg[yy][xx] = bg end
+      end
+    end
+  end
+end
+
+local function cvBar(cv, x, y, w, frac, fg, label)
+  local filled = math.floor(clamp(frac, 0, 1) * w + 0.5)
+  cvFill(cv, x, y, w, 1, C.grey)
+  cvFill(cv, x, y, filled, 1, fg)
+  if label then
+    local lx = x + math.floor((w - #label) / 2)
+    for i = 1, #label do
+      local cx = lx + i - 1
+      if cx >= x and cx < x + w then cvWrite(cv, cx, y, label:sub(i, i), C.white) end
+    end
+  end
+end
+
+local function cvFlush(cv, dev)
+  if not cv.st then cv.st, cv.sf, cv.sb = {}, {}, {} end
+  for y = 1, cv.h do
+    local T, F, B = cv.text[y], cv.fg[y], cv.bg[y]
+    local key = table.concat(T) .. table.concat(F) .. table.concat(B)
+    if cv.shown[y] ~= key then
+      local st, sf, sb = cv.st[y] or {}, cv.sf[y] or {}, cv.sb[y] or {}
+      local function differs(x) return T[x] ~= st[x] or F[x] ~= sf[x] or B[x] ~= sb[x] end
+      local x = 1
+      while x <= cv.w do
+        if not differs(x) then
+          x = x + 1
+        else
+          local e, gap = x, 0
+          while e < cv.w and gap <= 3 do
+            if differs(e + 1) then gap = 0 else gap = gap + 1 end
+            e = e + 1
+          end
+          e = e - gap
+          local s = x
+          while s <= e do
+            local f, b = F[s], B[s]
+            local r = s
+            while r < e and F[r + 1] == f and B[r + 1] == b do r = r + 1 end
+            dev.setCursorPos(s, y)
+            if cv.colour then
+              if cv.curF ~= f then dev.setTextColour(colourOf(f)); cv.curF = f end
+              if cv.curB ~= b then dev.setBackgroundColour(colourOf(b)); cv.curB = b end
+            end
+            dev.write(table.concat(T, "", s, r))
+            for i = s, r do st[i], sf[i], sb[i] = T[i], F[i], B[i] end
+            s = r + 1
+          end
+          x = e + 1
+        end
+      end
+      cv.st[y], cv.sf[y], cv.sb[y] = st, sf, sb
+      cv.shown[y] = key
+    end
+  end
+end
+
+-- 3x5 digits, drawn `k` times bigger (each "pixel" is k wide and k tall)
+local DIGITS = {
+  ["0"] = { "###", "# #", "# #", "# #", "###" }, ["1"] = { " # ", "## ", " # ", " # ", "###" },
+  ["2"] = { "###", "  #", "###", "#  ", "###" }, ["3"] = { "###", "  #", " ##", "  #", "###" },
+  ["4"] = { "# #", "# #", "###", "  #", "  #" }, ["5"] = { "###", "#  ", "###", "  #", "###" },
+  ["6"] = { "###", "#  ", "###", "# #", "###" }, ["7"] = { "###", "  #", "  #", "  #", "  #" },
+  ["8"] = { "###", "# #", "###", "# #", "###" }, ["9"] = { "###", "# #", "###", "  #", "###" },
+  [","] = { "   ", "   ", "   ", " # ", "#  " }, ["."] = { "   ", "   ", "   ", "   ", " # " },
+}
+
+local function bigWidth(s, k) return #s * 4 * k - k end
+
+local function cvBig(cv, x, y, s, colour, k)
+  for i = 1, #s do
+    local g = DIGITS[s:sub(i, i)]
+    if g then
+      for row = 1, 5 do
+        for col = 1, 3 do
+          if g[row]:sub(col, col) == "#" then
+            cvFill(cv, x + (col - 1) * k, y + (row - 1) * k, k, k, colour)
+          end
+        end
+      end
+    end
+    x = x + 4 * k
+  end
+end
+
+local function panel(cv, x, y, w, h, title, colour)
+  cvFill(cv, x, y, w, h, C.black)
+  cvFill(cv, x, y, w, 1, colour or C.blue)
+  cvWrite(cv, x + 1, y, title, C.white, colour or C.blue)
+end
+
+local function kv(cv, x, y, w, key, value, colour)
+  cvWrite(cv, x, y, key, C.lightGrey)
+  cvWrite(cv, x + w - #value, y, value, colour or C.white)
+end
+
+---------------------------------------------------------------------------------------------------
+-- reading the relay (in the background: http.request, answered by an event)
+
+local status = nil         -- the relay's last answer: { now, sources = { name = { age, data } } }
+local readAt = nil         -- os.clock() of the last good read
+local relayProblem = nil   -- text, while reads fail
+local pending, pendingSince = nil, 0
+
+local function startRead()
+  if pending then
+    if os.clock() - pendingSince < TIMEOUT then return end
+    pending = nil
+    relayProblem = "the relay doesn't answer"
+  end
+  local url = RELAY .. "/status"
+  if pcall(http.request, url) then pending, pendingSince = url, os.clock() end
+end
+
+local function readDone(event, url, handle)
+  if url ~= pending then return false end
+  pending = nil
+  if event == "http_success" then
+    local text = handle.readAll()
+    handle.close()
+    local t = textutils.unserialize(text or "")
+    if type(t) == "table" and type(t.sources) == "table" then
+      status, readAt, relayProblem = t, os.clock(), nil
+    else
+      relayProblem = "the relay's answer couldn't be read"
+    end
+  else
+    relayProblem = "can't reach the relay"
+  end
+  return true
+end
+
+-- The reactors to show, in SOURCES order, then anything else that reports.
+local function reactors()
+  local list, seen = {}, {}
+  local sources = status and status.sources or {}
+  for _, s in ipairs(SOURCES) do
+    seen[s.name] = true
+    list[#list + 1] = { name = s.name, label = s.label, where = s.where, src = sources[s.name] }
+  end
+  local extra = {}
+  for name, src in pairs(sources) do
+    if not seen[name] and type(src) == "table" and type(src.data) == "table" and src.data.reactor then
+      extra[#extra + 1] = name
+    end
+  end
+  table.sort(extra)
+  for _, name in ipairs(extra) do list[#list + 1] = { name = name, label = name, where = "?", src = sources[name] } end
+  for _, r in ipairs(list) do
+    local d = r.src and r.src.data
+    r.d = type(d) == "table" and d or nil
+    r.R = r.d and type(r.d.reactor) == "table" and r.d.reactor or {}
+    r.T = r.d and type(r.d.totals) == "table" and r.d.totals or {}
+    r.turbines = r.d and type(r.d.turbines) == "table" and r.d.turbines or {}
+    -- how old the report is: the relay's age, plus time since we read the relay
+    r.age = r.src and (num(r.src.age) + (readAt and os.clock() - readAt or 0)) or nil
+    r.live = r.age ~= nil and r.age <= STALE
+  end
+  return list
+end
+
+---------------------------------------------------------------------------------------------------
+-- main wall: total power and fuel
+
+local function drawMain(cv, list)
+  cvClear(cv, C.black)
+  local w, h = cv.w, cv.h
+  cvFill(cv, 1, 1, w, 1, C.grey)
+  cvWrite(cv, 2, 1, "POWER - MARS + EARTH", C.white, C.grey)
+  local note = relayProblem and ("RELAY: " .. relayProblem) or
+    (readAt and ("updated " .. math.floor(os.clock() - readAt + 0.5) .. "s ago") or "connecting...")
+  cvWrite(cv, w - #note, 1, note, C.white, relayProblem and C.red or C.grey)
+
+  local total, mars, earth, spare, possible = 0, 0, 0, 0, 0
+  for _, r in ipairs(list) do
+    if r.live then
+      local rf = num(r.T.rf)
+      total = total + rf
+      if r.where == "Earth" then earth = earth + rf else mars = mars + rf end
+      spare = spare + num(r.T.standby) * TURBINE_RF
+      possible = possible + (num(r.T.running) + num(r.T.standby)) * TURBINE_RF
+    end
+  end
+
+  -- the big number: as big as fits
+  local s = commas(round(total, 100))
+  local k = 1
+  while k < 4 and bigWidth(s, k + 1) + 8 <= w and 5 * (k + 1) + 20 <= h do k = k + 1 end
+  local bx = math.max(2, math.floor((w - bigWidth(s, k) - 6) / 2))
+  cvBig(cv, bx, 3, s, C.lime, k)
+  cvWrite(cv, bx + bigWidth(s, k) + 2, 3 + 5 * k - 1, "RF/t", C.lime)
+  local y = 3 + 5 * k + 1
+
+  local split = "Mars " .. commas(round(mars, 100)) .. " RF/t    Earth " .. commas(round(earth, 100)) .. " RF/t"
+  cvWrite(cv, math.max(2, math.floor((w - #split) / 2)), y, split, C.white)
+  y = y + 2
+  local inner = w - 4
+  cvWrite(cv, 3, y, "In use", C.lightGrey)
+  cvBar(cv, 13, y, inner - 10, possible > 0 and total / possible or 0, C.green,
+    short(total) .. " of " .. short(possible) .. " RF/t  (" .. short(spare) .. " spare on standby)")
+  y = y + 2
+
+  -- fuel, one row per reactor
+  local rows = #list
+  panel(cv, 2, y, w - 2, rows + 3, "FUEL")
+  local cName, cBar = 3, 12
+  local cols = { { "burn", 14 }, { "ingots/h", 10 }, { "lasts", 10 }, { "waste", 10 } }
+  local rightW = 0
+  for _, c in ipairs(cols) do rightW = rightW + c[2] end
+  local barW = math.max(10, w - cBar - rightW - 4)
+  local x = cBar + barW + 1
+  for _, c in ipairs(cols) do
+    cvWrite(cv, x + c[2] - #c[1], y + 1, c[1], C.lightGrey)
+    x = x + c[2]
+  end
+  for i, r in ipairs(list) do
+    local ry = y + 1 + i
+    cvWrite(cv, cName, ry, r.label, r.live and C.white or C.red)
+    if not r.live then
+      cvWrite(cv, cBar, ry, r.src and ("not reporting (" .. duration(r.age) .. ")") or "no reports yet", C.red)
+    else
+      local fuel, fuelMax, burn = num(r.R.fuel), num(r.R.fuelMax), num(r.R.burn)
+      cvBar(cv, cBar, ry, barW, fuelMax > 0 and fuel / fuelMax or 0, C.yellow,
+        short(fuel) .. " mB  " .. pct(fuelMax > 0 and fuel / fuelMax or 0))
+      local vals = {
+        dec(burn, 3) .. " mB/t",
+        dec(burn * 72, 1),                                    -- mB/t * 20 * 3600 / 1000 mB per ingot
+        burn > 0 and duration(fuel / burn / 20) or "-",
+        short(num(r.R.waste)) .. " mB",
+      }
+      x = cBar + barW + 1
+      for j, c in ipairs(cols) do
+        cvWrite(cv, x + c[2] - #vals[j], ry, vals[j], C.white)
+        x = x + c[2]
+      end
+    end
+  end
+
+  -- power by reactor, if there's room: a bar of what each makes out of what its turbines could
+  y = y + rows + 4
+  if y + rows + 2 <= h then
+    panel(cv, 2, y, w - 2, rows + 2, "POWER BY REACTOR")
+    local statusW = 26
+    local pbarW = math.max(10, w - cBar - statusW - 3)
+    for i, r in ipairs(list) do
+      local ry = y + i
+      cvWrite(cv, cName, ry, r.label, r.live and C.white or C.red)
+      if r.live then
+        local cap = (num(r.T.running) + num(r.T.standby)) * TURBINE_RF
+        local rf = num(r.T.rf)
+        cvBar(cv, cBar, ry, pbarW, cap > 0 and rf / cap or 0, r.where == "Earth" and C.lightBlue or C.orange,
+          commas(round(rf, 100)) .. " RF/t")
+        local st = num(r.T.running) .. " on, " .. num(r.T.standby) .. " standby"
+        if num(r.T.offline) > 0 then st = st .. ", " .. num(r.T.offline) .. " off" end
+        cvWrite(cv, w - 1 - #st, ry, st, num(r.T.offline) > 0 and C.red or C.lightGrey)
+      else
+        cvWrite(cv, cBar, ry, r.src and "not reporting" or "no reports yet", C.red)
+      end
+    end
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- reactors wall: one panel each
+
+local function drawReactor(cv, x, y, pw, ph, r)
+  local colour = r.live and (r.where == "Earth" and C.lightBlue or C.orange) or C.red
+  panel(cv, x, y, pw, ph, r.label .. "  (" .. r.name .. ")", colour)
+  local inner = pw - 2
+  local yy = y + 2
+  if not r.src then
+    cvWrite(cv, x + 1, yy, "No reports yet from \"" .. r.name .. "\"", C.red)
+    return
+  end
+  local R, T = r.R, r.T
+  if not r.live then
+    cvWrite(cv, x + 1, yy, "NOT REPORTING for " .. duration(r.age), C.red); yy = yy + 1
+    cvWrite(cv, x + 1, yy, "(last readings below)", C.grey); yy = yy + 2
+  end
+  local function line(key, value, c) if yy < y + ph then kv(cv, x + 1, yy, inner, key, value, c) end; yy = yy + 1 end
+  local function bar(key, frac, c, label)
+    if yy < y + ph then
+      cvWrite(cv, x + 1, yy, key, C.lightGrey)
+      cvBar(cv, x + 13, yy, inner - 12, frac, c, label)
+    end
+    yy = yy + 1
+  end
+  line("Status", R.ok and (R.active and "ONLINE" or "OFFLINE") or "not connected",
+    (R.ok and R.active) and C.lime or C.red)
+  line("Controller", tostring(R.control or "?"), (tostring(R.control or ""):find("WATER") or tostring(R.control or ""):find("hot")) and C.red or C.yellow)
+  line("Control rods", dec(num(R.rods), 1) .. "%")
+  line("Power", commas(round(num(T.rf), 100)) .. " RF/t", C.lime)
+  line("Turbines", string.format("%d on / %d standby / %d off", num(T.running), num(T.standby), num(T.offline)),
+    num(T.offline) > 0 and C.red or C.white)
+  line("Steam", commas(round(num(R.steamMade), 10)) .. " / " .. commas(num(R.demand)) .. " mB/t")
+  bar("Water", num(R.waterMax) > 0 and num(R.water) / num(R.waterMax) or 0, C.blue,
+    short(num(R.water)) .. " / " .. short(num(R.waterMax)))
+  bar("Steam tank", num(R.steamMax) > 0 and num(R.steam) / num(R.steamMax) or 0, C.lightGrey,
+    short(num(R.steam)) .. " / " .. short(num(R.steamMax)))
+  local temp = num(R.fuelTemp)
+  line("Fuel temp", commas(temp) .. " C", temp > 1000 and C.red or (temp > 600 and C.yellow or C.white))
+  line("Fuel burn", dec(num(R.burn), 3) .. " mB/t")
+  line("Reactivity", string.format("%d%%", math.floor(num(R.reactivity) + 0.5)))
+  local up = num(r.d.up)
+  line("Up", string.format("%dh %02dm", math.floor(up / 3600), math.floor(up % 3600 / 60)) ..
+    "   " .. tostring(r.d.v or "") .. (r.d.sha and (" " .. r.d.sha) or ""), C.grey)
+end
+
+local function drawReactors(cv, list)
+  cvClear(cv, C.black)
+  cvFill(cv, 1, 1, cv.w, 1, C.grey)
+  cvWrite(cv, 2, 1, "REACTORS", C.white, C.grey)
+  local cols = cv.w >= 80 and 2 or 1
+  local rowsN = math.ceil(#list / cols)
+  local pw = math.floor((cv.w - 1) / cols) - 1
+  local ph = math.floor((cv.h - 2) / math.max(1, rowsN)) - 1
+  for i, r in ipairs(list) do
+    local col = (i - 1) % cols
+    local row = math.floor((i - 1) / cols)
+    drawReactor(cv, 2 + col * (pw + 1), 3 + row * (ph + 1), pw, ph, r)
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- turbines wall: small cards grouped by reactor
+
+local CARD_W, CARD_H = 13, 5   -- including a one-character gap (12 to a row on an 8-wide wall)
+local STATE = { RUNNING = { "RUN", C.green }, STANDBY = { "STBY", C.grey }, SPARE = { "SPARE", C.purple },
+                ["SPIN-UP"] = { "SPIN", C.orange }, OFFLINE = { "OFF", C.red } }
+
+local function drawCard(cv, x, y, t, live)
+  local st = STATE[t.state] or { tostring(t.state or "?"):sub(1, 5), C.grey }
+  local colour = (live and t.ok ~= false) and st[2] or C.red
+  local cw = CARD_W - 1
+  cvFill(cv, x, y, cw, CARD_H - 1, C.black)
+  cvFill(cv, x, y, cw, 1, colour)
+  cvWrite(cv, x + 1, y, tostring(t.n or "?"), C.white, colour)
+  local label = t.ok == false and "LOST" or st[1]
+  cvWrite(cv, x + cw - 1 - #label, y, label, C.white, colour)
+  if t.ok == false then
+    cvWrite(cv, x + 1, y + 1, "not connected", C.red)
+    return
+  end
+  local rpm = num(t.rpm)
+  cvWrite(cv, x + 1, y + 1, commas(round(rpm, 10)) .. " rpm",
+    (rpm > 2400 and rpm < 2900) and C.lime or (rpm >= 2900 and C.red or C.yellow))
+  cvWrite(cv, x + 1, y + 2, num(t.rf) > 0 and (short(round(num(t.rf), 100)) .. " RF/t") or "-", C.white)
+  cvBar(cv, x, y + 3, cw, num(t.buffer), C.red, "buf " .. pct(num(t.buffer)))
+end
+
+local function turbineRows(w, list)
+  local perRow = math.max(1, math.floor((w - 1) / CARD_W))
+  local rows = 0
+  for _, r in ipairs(list) do
+    if #r.turbines > 0 then rows = rows + 2 + math.ceil(#r.turbines / perRow) * CARD_H end
+  end
+  return rows + 2
+end
+
+local function drawTurbines(cv, list)
+  cvClear(cv, C.black)
+  cvFill(cv, 1, 1, cv.w, 1, C.grey)
+  local count = 0
+  for _, r in ipairs(list) do count = count + #r.turbines end
+  cvWrite(cv, 2, 1, "TURBINES (" .. count .. ")", C.white, C.grey)
+  local perRow = math.max(1, math.floor((cv.w - 1) / CARD_W))
+  local y = 3
+  for _, r in ipairs(list) do
+    if #r.turbines > 0 then
+      local on, sb = num(r.T.running), num(r.T.standby)
+      local head = r.label .. "   " .. on .. " running, " .. sb .. " standby   " .. commas(round(num(r.T.rf), 100)) .. " RF/t"
+      cvWrite(cv, 2, y, head, r.live and (r.where == "Earth" and C.lightBlue or C.orange) or C.red)
+      if not r.live then cvWrite(cv, 3 + #head, y, "  NOT REPORTING", C.red) end
+      y = y + 1
+      for i, t in ipairs(r.turbines) do
+        local col = (i - 1) % perRow
+        local row = math.floor((i - 1) / perRow)
+        drawCard(cv, 2 + col * CARD_W, y + row * CARD_H, t, r.live)
+      end
+      y = y + math.ceil(#r.turbines / perRow) * CARD_H + 1
+    end
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- the walls
+
+local ROLES = { "main", "reactors", "turbines" }
+local ROLE_NAME = { main = "MAIN (total power + fuel)", reactors = "REACTORS", turbines = "TURBINES" }
+local walls = {}   -- role -> { name, p, canvas, scaleFor }
+
+local function loadWalls()
+  local h = fs.open(WALLS_FILE, "r")
+  if not h then return nil end
+  local t = textutils.unserialize(h.readAll() or "")
+  h.close()
+  return type(t) == "table" and t or nil
+end
+
+-- Asks which monitor is which wall: each monitor says "touch me", and the touches are taken in order.
+local function setup()
+  local mons = {}
+  for _, name in ipairs(peripheral.getNames()) do
+    if peripheral.getType(name) == "monitor" then mons[#mons + 1] = name end
+  end
+  if #mons == 0 then
+    print("No monitors connected. Connect the walls with wired modems (right-click them so they")
+    print("turn red) and networking cable, then run this again.")
+    return nil
+  end
+  local chosen, taken = {}, {}
+  for _, role in ipairs(ROLES) do
+    for _, name in ipairs(mons) do
+      local m = peripheral.wrap(name)
+      m.setTextScale(1)
+      m.setBackgroundColour(colours.black)
+      m.clear()
+      m.setCursorPos(2, 2)
+      if taken[name] then
+        m.setTextColour(colours.grey)
+        m.write("This is the " .. taken[name] .. " wall.")
+      else
+        m.setTextColour(colours.yellow)
+        m.write("Touch the wall for: " .. ROLE_NAME[role])
+      end
+    end
+    print("Touch the monitor wall for " .. ROLE_NAME[role] .. "  (or press S to skip it)")
+    while true do
+      local e, p1 = os.pullEvent()
+      if e == "monitor_touch" and not taken[p1] then
+        chosen[role], taken[p1] = p1, role:upper()
+        print("  " .. role .. " = " .. p1)
+        break
+      elseif e == "key" and p1 == keys.s then
+        print("  " .. role .. " skipped")
+        break
+      end
+    end
+  end
+  local h = fs.open(WALLS_FILE, "w")
+  h.write(textutils.serialize(chosen))
+  h.close()
+  for _, name in ipairs(mons) do pcall(function() local m = peripheral.wrap(name); m.clear() end) end
+  return chosen
+end
+
+-- Each wall gets the biggest text that still fits what it has to show.
+local FITS = {
+  main = function(w, h, list) return w >= 64 and h >= 22 + #list end,
+  reactors = function(w, h, list)
+    local cols = w >= 80 and 2 or 1
+    return w >= 40 and math.floor((h - 2) / math.ceil(#list / cols)) - 1 >= 15
+  end,
+  turbines = function(w, h, list) return w >= 2 * CARD_W + 1 and turbineRows(w, list) <= h end,
+}
+local DRAW = { main = drawMain, reactors = drawReactors, turbines = drawTurbines }
+
+local function fitKey(role, list)
+  if role == "main" or role == "reactors" then return #list end
+  local parts = {}
+  for _, r in ipairs(list) do parts[#parts + 1] = #r.turbines end
+  return table.concat(parts, ",")
+end
+
+local function drawWall(role, list)
+  local wall = walls[role]
+  if not wall then return end
+  local ok = pcall(function()
+    local p = wall.p
+    local key = fitKey(role, list)
+    local w, h = p.getSize()
+    if not wall.canvas or wall.canvas.w ~= w or wall.canvas.h ~= h or wall.key ~= key then
+      local scale = 5
+      while true do
+        p.setTextScale(scale)
+        local tw, th = p.getSize()
+        if scale <= 0.5 or FITS[role](tw, th, list) then break end
+        scale = scale - 0.5
+      end
+      w, h = p.getSize()
+      wall.canvas = newCanvas(w, h, p.isColour and p.isColour() or false)
+      wall.key = key
+      p.setBackgroundColour(colours.black)
+      p.clear()
+    end
+    DRAW[role](wall.canvas, list)
+    cvFlush(wall.canvas, p)
+  end)
+  if not ok then wall.canvas = nil end
+end
+
+local function connectWalls(names)
+  walls = {}
+  for _, role in ipairs(ROLES) do
+    local name = names[role]
+    if name and peripheral.getType(name) == "monitor" then
+      walls[role] = { name = name, p = peripheral.wrap(name) }
+    end
+  end
+end
+
+local function drawTerminal(list)
+  term.setBackgroundColour(colours.black)
+  term.clear()
+  term.setCursorPos(1, 1)
+  print("dashboard - reading " .. RELAY)
+  print("")
+  print("Relay: " .. (relayProblem or (readAt and ("ok, " .. math.floor(os.clock() - readAt + 0.5) .. "s ago") or "connecting...")))
+  for _, r in ipairs(list) do
+    print(string.format("  %-8s %s", r.label, not r.src and "no reports yet" or
+      (r.live and (commas(round(num(r.T.rf), 100)) .. " RF/t") or "NOT REPORTING")))
+  end
+  print("")
+  for _, role in ipairs(ROLES) do
+    print(string.format("%-9s wall: %s", role, walls[role] and walls[role].name or "not connected"))
+  end
+  print("")
+  print("Q to stop. \"dashboard setup\" picks the walls again.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- main loop
+
+if not http then
+  print("The http API is off on this server.")
+  return
+end
+
+local names = (args[1] ~= "setup") and loadWalls() or nil
+if not names then
+  names = setup()
+  if not names then return end
+end
+connectWalls(names)
+
+startRead()
+local timer = os.startTimer(0.5)
+while true do
+  local event, p1, p2 = os.pullEventRaw()
+  if event == "http_success" or event == "http_failure" then
+    if readDone(event, p1, p2) then
+      local list = reactors()
+      for _, role in ipairs(ROLES) do drawWall(role, list) end
+      drawTerminal(list)
+    end
+  elseif event == "timer" and p1 == timer then
+    startRead()
+    if relayProblem or not status then
+      local list = reactors()
+      for _, role in ipairs(ROLES) do drawWall(role, list) end
+      drawTerminal(list)
+    end
+    timer = os.startTimer(REFRESH)
+  elseif event == "peripheral" or event == "peripheral_detach" or event == "monitor_resize" then
+    connectWalls(names)
+  elseif (event == "key" and p1 == keys.q) or event == "terminate" then
+    term.clear(); term.setCursorPos(1, 1)
+    print("dashboard stopped.")
+    return
+  end
+end
