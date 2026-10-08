@@ -328,7 +328,7 @@ local function drawMain(cv, list)
 
   -- fuel, one row per reactor
   local rows = #list
-  panel(cv, 2, y, w - 2, rows + 3, "FUEL")
+  panel(cv, 2, y, w - 2, rows + 4, "FUEL")
   local cName, cBar = 3, 12
   local cols = { { "burn", 14 }, { "ingots/h", 10 }, { "lasts", 10 }, { "waste", 10 } }
   local rightW = 0
@@ -339,6 +339,7 @@ local function drawMain(cv, list)
     cvWrite(cv, x + c[2] - #c[1], y + 1, c[1], C.lightGrey)
     x = x + c[2]
   end
+  local sumFuel, sumBurn, sumWaste = 0, 0, 0
   for i, r in ipairs(list) do
     local ry = y + 1 + i
     cvWrite(cv, cName, ry, r.label, r.live and C.white or C.red)
@@ -346,6 +347,7 @@ local function drawMain(cv, list)
       cvWrite(cv, cBar, ry, r.src and ("not reporting (" .. duration(r.age) .. ")") or "no reports yet", C.red)
     else
       local fuel, fuelMax, burn = num(r.R.fuel), num(r.R.fuelMax), num(r.R.burn)
+      sumFuel, sumBurn, sumWaste = sumFuel + fuel, sumBurn + burn, sumWaste + num(r.R.waste)
       cvBar(cv, cBar, ry, barW, fuelMax > 0 and fuel / fuelMax or 0, C.yellow,
         short(fuel) .. " mB  " .. pct(fuelMax > 0 and fuel / fuelMax or 0))
       local vals = {
@@ -361,9 +363,19 @@ local function drawMain(cv, list)
       end
     end
   end
+  -- all the reactors together (the ones reporting)
+  local ty = y + 2 + rows
+  cvWrite(cv, cName, ty, "Total", C.yellow)
+  cvWrite(cv, cBar, ty, short(sumFuel) .. " mB of fuel", C.lightGrey)
+  local totals = { dec(sumBurn, 3) .. " mB/t", dec(sumBurn * 72, 1), "", short(sumWaste) .. " mB" }
+  x = cBar + barW + 1
+  for j, c in ipairs(cols) do
+    cvWrite(cv, x + c[2] - #totals[j], ty, totals[j], C.yellow)
+    x = x + c[2]
+  end
 
   -- power by reactor, if there's room: a bar of what each makes out of what its turbines could
-  y = y + rows + 4
+  y = y + rows + 5
   if y + rows + 2 <= h then
     panel(cv, 2, y, w - 2, rows + 2, "POWER BY REACTOR")
     local statusW = 26
@@ -600,7 +612,7 @@ end
 
 -- Each wall gets the biggest text that still fits what it has to show.
 local FITS = {
-  main = function(w, h, list) return w >= 64 and h >= 22 + #list end,
+  main = function(w, h, list) return w >= 64 and h >= 23 + #list end,
   reactors = function(w, h, list)
     local cols = w >= 80 and 2 or 1
     return w >= 40 and math.floor((h - 2) / math.ceil(#list / cols)) - 1 >= 15
