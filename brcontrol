@@ -11,7 +11,7 @@
 -- when the power is needed again. Stood-down turbines are kept at speed with their coils off,
 -- so they make full power as soon as they're back.
 
-local VERSION = "v8.5"
+local VERSION = "v8.6"
 -- the GitHub commit this copy came from, written by the update program (nil if installed by hand)
 local COMMIT = nil
 do
@@ -26,7 +26,8 @@ local CFG = {
   bufferHigh    = 0.99,  -- a turbine whose power buffer is this full stands down (its power has nowhere to go)
   bufferLow     = 0.20,  -- it comes back when its buffer drops below this (far apart, so turbines rarely cycle)
   standDownWait = 6,     -- at most one turbine stands down per this many seconds (one per update)
-  standbyRPM    = 2500,  -- RPM: stood-down turbines are kept spinning up to this, coils off
+  standbyRPM    = 2650,  -- RPM: stood-down turbines are kept spinning up to this, coils off (about
+                         -- the running speed, so one that starts again gives full power at once)
   holdFlow      = 50,    -- mB/t of steam that keeps a stood-down turbine at speed
   steamPerRod   = 4000,  -- roughly how many mB/t of steam 1% of control rod changes (measured on the 16x16x14 reactor)
   steamMargin   = 500,   -- mB/t of steam made above what the turbines use, to keep them full
