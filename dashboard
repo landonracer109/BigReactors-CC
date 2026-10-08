@@ -462,30 +462,47 @@ local function drawCard(cv, x, y, t, live)
   cvBar(cv, x, y + 3, cw, num(t.buffer), C.red, "buf " .. pct(num(t.buffer)))
 end
 
+local function groupsOf(list)
+  local n = 0
+  for _, r in ipairs(list) do if #r.turbines > 0 then n = n + 1 end end
+  return n
+end
+
+-- Lines needed. A wall showing one reactor uses its title bar for that reactor's heading.
 local function turbineRows(w, list)
   local perRow = math.max(1, math.floor((w - 1) / CARD_W))
   local rows = 0
   for _, r in ipairs(list) do
     if #r.turbines > 0 then rows = rows + 2 + math.ceil(#r.turbines / perRow) * CARD_H end
   end
-  return rows + 2
+  return rows + (groupsOf(list) == 1 and 0 or 2)
 end
 
 local function drawTurbines(cv, list)
   cvClear(cv, C.black)
   cvFill(cv, 1, 1, cv.w, 1, C.grey)
-  local count = 0
-  for _, r in ipairs(list) do count = count + #r.turbines end
-  cvWrite(cv, 2, 1, "TURBINES (" .. count .. ")", C.white, C.grey)
+  local single = groupsOf(list) == 1
+  if not single then
+    local count = 0
+    for _, r in ipairs(list) do count = count + #r.turbines end
+    cvWrite(cv, 2, 1, "TURBINES (" .. count .. ")", C.white, C.grey)
+  end
   local perRow = math.max(1, math.floor((cv.w - 1) / CARD_W))
-  local y = 3
+  local y = single and 1 or 3
   for _, r in ipairs(list) do
     if #r.turbines > 0 then
       local on, sb = num(r.T.running), num(r.T.standby)
-      local head = r.label .. "   " .. on .. " running, " .. sb .. " standby   " .. commas(round(num(r.T.rf), 100)) .. " RF/t"
-      cvWrite(cv, 2, y, head, r.live and (r.where == "Earth" and C.lightBlue or C.orange) or C.red)
-      if not r.live then cvWrite(cv, 3 + #head, y, "  NOT REPORTING", C.red) end
-      y = y + 1
+      local head = r.label .. " TURBINES   " .. on .. " running, " .. sb .. " standby   " .. commas(round(num(r.T.rf), 100)) .. " RF/t"
+      local colour = r.live and (r.where == "Earth" and C.lightBlue or C.orange) or C.red
+      if single then
+        cvWrite(cv, 2, y, head, C.white, C.grey)
+        if not r.live then cvWrite(cv, 3 + #head, y, "  NOT REPORTING", C.white, C.red) end
+        y = y + 2
+      else
+        cvWrite(cv, 2, y, head, colour)
+        if not r.live then cvWrite(cv, 3 + #head, y, "  NOT REPORTING", C.red) end
+        y = y + 1
+      end
       for i, t in ipairs(r.turbines) do
         local col = (i - 1) % perRow
         local row = math.floor((i - 1) / perRow)
@@ -499,9 +516,13 @@ end
 ---------------------------------------------------------------------------------------------------
 -- the walls
 
-local ROLES = { "main", "reactors", "turbines", "turbines2" }
-local ROLE_NAME = { main = "MAIN (total power + fuel)", reactors = "REACTORS", turbines = "TURBINES",
-                    turbines2 = "TURBINES 2 (the turbines are split over two walls; S = one wall)" }
+-- Up to four turbine walls: the reactors are shared out between however many are set up.
+local TURBINE_ROLES = { "turbines", "turbines2", "turbines3", "turbines4" }
+local ROLES = { "main", "reactors", "turbines", "turbines2", "turbines3", "turbines4" }
+local ROLE_NAME = { main = "MAIN (total power + fuel)", reactors = "REACTORS", turbines = "TURBINES 1",
+                    turbines2 = "TURBINES 2 (S if there are no more turbine walls)",
+                    turbines3 = "TURBINES 3 (S if there are no more turbine walls)",
+                    turbines4 = "TURBINES 4 (S if there are no more turbine walls)" }
 local walls = {}   -- role -> { name, p, canvas, scaleFor }
 
 local function loadWalls()
@@ -524,7 +545,12 @@ local function setup()
     return nil
   end
   local chosen, taken = {}, {}
+  local noMoreTurbines = false
   for _, role in ipairs(ROLES) do
+    -- every monitor already has a job, or a turbine wall was skipped: no more turbine walls
+    local free = 0
+    for _, name in ipairs(mons) do if not taken[name] then free = free + 1 end end
+    if role:find("^turbines") and (noMoreTurbines or free == 0) then break end
     for _, name in ipairs(mons) do
       local m = peripheral.wrap(name)
       m.setTextScale(1)
@@ -548,6 +574,7 @@ local function setup()
         break
       elseif e == "key" and p1 == keys.s then
         print("  " .. role .. " skipped")
+        if role:find("^turbines") then noMoreTurbines = true end
         break
       end
     end
@@ -568,8 +595,8 @@ local FITS = {
   end,
   turbines = function(w, h, list) return w >= 2 * CARD_W + 1 and turbineRows(w, list) <= h end,
 }
-local DRAW = { main = drawMain, reactors = drawReactors, turbines = drawTurbines, turbines2 = drawTurbines }
-FITS.turbines2 = FITS.turbines
+local DRAW = { main = drawMain, reactors = drawReactors }
+for _, r in ipairs(TURBINE_ROLES) do DRAW[r] = drawTurbines; FITS[r] = FITS.turbines end
 
 local function fitKey(role, list)
   if role == "main" or role == "reactors" then return #list end
@@ -578,24 +605,36 @@ local function fitKey(role, list)
   return table.concat(parts, ",")
 end
 
--- With a second turbines wall, the reactors are shared out between the two (in order, each
--- reactor's turbines kept together), so each wall holds about half of them.
+-- With several turbine walls, the reactors are shared out between them in order, each reactor's
+-- turbines kept together, so each wall holds about the same number (with as many walls as
+-- reactors: one reactor each, which leaves room for bigger text).
 local function turbineShare(role, list)
-  if not walls.turbines or not walls.turbines2 then return list end
+  local present, mine = {}, nil
+  for _, r in ipairs(TURBINE_ROLES) do
+    if walls[r] then
+      present[#present + 1] = r
+      if r == role then mine = #present end
+    end
+  end
+  local n = #present
+  if n <= 1 or not mine then return list end
   local total = 0
   for _, r in ipairs(list) do total = total + #r.turbines end
-  local first, second, sum = {}, {}, 0
+  if total == 0 then return mine == 1 and list or {} end
+  local part, before = {}, 0
   for _, r in ipairs(list) do
-    if sum < total / 2 then first[#first + 1] = r else second[#second + 1] = r end
-    sum = sum + #r.turbines
+    -- the wall a reactor goes to is set by where the middle of its turbines falls
+    local wall = math.min(n, math.floor((before + #r.turbines / 2) / total * n) + 1)
+    if wall == mine then part[#part + 1] = r end
+    before = before + #r.turbines
   end
-  return role == "turbines" and first or second
+  return part
 end
 
 local function drawWall(role, list)
   local wall = walls[role]
   if not wall then return end
-  if role == "turbines" or role == "turbines2" then list = turbineShare(role, list) end
+  if role:find("^turbines") then list = turbineShare(role, list) end
   local ok = pcall(function()
     local p = wall.p
     local key = fitKey(role, list)
