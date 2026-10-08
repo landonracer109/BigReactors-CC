@@ -11,7 +11,7 @@
 -- when the power is needed again. Stood-down turbines are kept at speed with their coils off,
 -- so they make full power as soon as they're back.
 
-local VERSION = "v8.1"
+local VERSION = "v8.2"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
@@ -24,6 +24,7 @@ local CFG = {
   holdFlow      = 50,    -- mB/t of steam that keeps a stood-down turbine at speed
   steamPerRod   = 4000,  -- roughly how many mB/t of steam 1% of control rod changes (measured on the 16x16x14 reactor)
   steamMargin   = 500,   -- mB/t of steam made above what the turbines use, to keep them full
+  hotTemp       = 1000,  -- C: hotter than this with a full steam tank means heat is piling up: rods in
   control       = 2,     -- seconds between control rod adjustments (3 reactor reads each)
   update        = 6,     -- seconds between turbine reads and dashboard redraws (a multiple of control)
   textScale     = 0,     -- monitor text size 0.5-5; 0 = the biggest that fits
@@ -372,10 +373,20 @@ local function controlReactor()
     -- thousand mB banked in the tank); the reading jumps a lot, so it's weighted lightly.
     local margin = math.min(CFG.steamMargin, R.steamMax > 0 and math.max(0, R.steamMax - want) or CFG.steamMargin)
     local surplus = R.steamMade - want - margin + 0.1 * math.min(R.steam, want * 0.5)
-    -- At the tank limit (made plus what's left in the tank fills it) the reactor may have more
-    -- heat than it can boil: ease the rods in until it drops below the limit.
+    -- At the tank limit (made plus what's left in the tank fills it) the reactor can only boil what
+    -- the turbines take, so "made" can't show extra heat any more: ease the rods in until it drops
+    -- below the limit. Extra heat that can't boil stays in the reactor and shows as temperature,
+    -- so the hotter it runs, the harder the rods go in (else it sits there for hours, hot and
+    -- burning several times the fuel).
+    -- (The reading of what's left in the tank is taken at a different moment from "made", so a
+    -- reactor stuck at the limit can read a few % under it: the hot check allows for that.)
     if R.steamMax > 0 and R.steamMade + R.steam >= R.steamMax * 0.99 then
       surplus = math.max(surplus, 0) + want * 0.02
+    end
+    local hot = math.max(R.fuelTemp or 0, R.caseTemp or 0)
+    local tooHot = hot > CFG.hotTemp and R.steamMax > 0 and R.steamMade + R.steam >= R.steamMax * 0.9
+    if tooHot then
+      surplus = math.max(surplus, 0) + want * math.min(1, (hot - CFG.hotTemp) / CFG.hotTemp)
     end
     -- PI controller in velocity form: react to the change in surplus (P) plus a slow push on the
     -- surplus itself (I). Tuned for the real reactor, which responds within seconds.
@@ -392,6 +403,8 @@ local function controlReactor()
       controlNote = "LOW WATER: holding"
     elseif demand > want then
       controlNote = "At " .. short(R.steamMax) .. " mB/t limit"
+    elseif tooHot then
+      controlNote = "Too hot: rods in"
     else
       controlNote = surplus < -want * 0.02 and "Raising steam" or
                     surplus > want * 0.02 and "Lowering steam" or "Steady"
