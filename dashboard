@@ -276,13 +276,25 @@ end
 ---------------------------------------------------------------------------------------------------
 -- main wall: total power and fuel
 
+-- How fresh the data is: the age of the newest report (the controllers report every 6 s, so this
+-- normally reads 0-6 s; it climbs if they stop, or while the relay can't be reached).
+local function freshness(list)
+  local newest
+  for _, r in ipairs(list) do
+    if r.age and (not newest or r.age < newest) then newest = r.age end
+  end
+  local age = newest and (math.floor(newest + 0.5) .. "s old") or nil
+  if relayProblem then return "RELAY: " .. relayProblem .. (age and (", newest data " .. age) or "") end
+  if not readAt then return "connecting..." end
+  return age and ("newest report " .. age) or "no reports yet"
+end
+
 local function drawMain(cv, list)
   cvClear(cv, C.black)
   local w, h = cv.w, cv.h
   cvFill(cv, 1, 1, w, 1, C.grey)
   cvWrite(cv, 2, 1, "POWER - MARS + EARTH", C.white, C.grey)
-  local note = relayProblem and ("RELAY: " .. relayProblem) or
-    (readAt and ("updated " .. math.floor(os.clock() - readAt + 0.5) .. "s ago") or "connecting...")
+  local note = freshness(list)
   cvWrite(cv, w - #note, 1, note, C.white, relayProblem and C.red or C.grey)
 
   local total, mars, earth, spare, possible = 0, 0, 0, 0, 0
@@ -675,7 +687,7 @@ local function drawTerminal(list)
   term.setCursorPos(1, 1)
   print("dashboard - reading " .. RELAY)
   print("")
-  print("Relay: " .. (relayProblem or (readAt and ("ok, " .. math.floor(os.clock() - readAt + 0.5) .. "s ago") or "connecting...")))
+  print("Relay: " .. freshness(list))
   for _, r in ipairs(list) do
     print(string.format("  %-8s %s", r.label, not r.src and "no reports yet" or
       (r.live and (commas(round(num(r.T.rf), 100)) .. " RF/t") or "NOT REPORTING")))
