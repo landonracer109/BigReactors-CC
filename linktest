@@ -1,0 +1,56 @@
+-- linktest: checks this computer can reach the brlink relay (the Mars <-> Earth link).
+-- ComputerCraft 1.63.
+--
+-- Setup: put the relay's key in a file called "brlink.key" on this computer
+-- (edit brlink.key, paste it with Ctrl+V, then Ctrl > Save > Enter, and Ctrl > Exit > Enter).
+-- Run "linktest": it sends a test report named after this computer, reads back everything the
+-- relay holds, and shows how long each step took.
+
+local URL = "https://brlink.tailbdc4d5.ts.net"
+
+local h = fs.open("brlink.key", "r")
+if not h then
+  print("No brlink.key file. Make one with: edit brlink.key")
+  return
+end
+local key = (h.readAll() or ""):gsub("%s", "")
+h.close()
+
+local name = "test-" .. os.getComputerID()
+local report = textutils.serialize({
+  test = true, computer = os.getComputerID(), label = os.getComputerLabel(),
+  day = os.day(), time = os.time(), clock = os.clock(),
+})
+
+print("Sending a test report as " .. name .. "...")
+local t0 = os.clock()
+local r = http.post(URL .. "/report/" .. name, report, { ["X-Key"] = key })
+if not r then
+  print("FAILED to send. Either the server can't reach the relay,")
+  print("or the key is wrong (the relay refuses bad keys).")
+  print("Trying a plain read to tell which...")
+else
+  print("Sent: " .. tostring(r.readAll()) .. string.format(" (%.2f s)", os.clock() - t0))
+  r.close()
+end
+
+t0 = os.clock()
+r = http.get(URL .. "/status")
+if not r then
+  print("FAILED to read " .. URL .. "/status: the server can't reach the relay.")
+  return
+end
+local status = textutils.unserialize(r.readAll())
+r.close()
+print(string.format("Read the relay (%.2f s).", os.clock() - t0))
+if type(status) ~= "table" or type(status.sources) ~= "table" then
+  print("...but couldn't understand what came back.")
+  return
+end
+local any = false
+for n, s in pairs(status.sources) do
+  any = true
+  print(string.format("  %-16s %6.1f s old", n, s.age or -1))
+end
+if not any then print("  (no reports yet)") end
+print("The link works if your " .. name .. " is listed above.")
