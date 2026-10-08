@@ -438,7 +438,7 @@ end
 ---------------------------------------------------------------------------------------------------
 -- turbines wall: small cards grouped by reactor
 
-local CARD_W, CARD_H = 13, 5   -- including a one-character gap (12 to a row on an 8-wide wall)
+local CARD_W, CARD_H = 13, 4   -- width includes a one-character gap; rows of cards touch (their colour bars separate them)
 local STATE = { RUNNING = { "RUN", C.green }, STANDBY = { "STBY", C.grey }, SPARE = { "SPARE", C.purple },
                 ["SPIN-UP"] = { "SPIN", C.orange }, OFFLINE = { "OFF", C.red } }
 
@@ -446,7 +446,7 @@ local function drawCard(cv, x, y, t, live)
   local st = STATE[t.state] or { tostring(t.state or "?"):sub(1, 5), C.grey }
   local colour = (live and t.ok ~= false) and st[2] or C.red
   local cw = CARD_W - 1
-  cvFill(cv, x, y, cw, CARD_H - 1, C.black)
+  cvFill(cv, x, y, cw, CARD_H, C.black)
   cvFill(cv, x, y, cw, 1, colour)
   cvWrite(cv, x + 1, y, tostring(t.n or "?"), C.white, colour)
   local label = t.ok == false and "LOST" or st[1]
@@ -499,8 +499,9 @@ end
 ---------------------------------------------------------------------------------------------------
 -- the walls
 
-local ROLES = { "main", "reactors", "turbines" }
-local ROLE_NAME = { main = "MAIN (total power + fuel)", reactors = "REACTORS", turbines = "TURBINES" }
+local ROLES = { "main", "reactors", "turbines", "turbines2" }
+local ROLE_NAME = { main = "MAIN (total power + fuel)", reactors = "REACTORS", turbines = "TURBINES",
+                    turbines2 = "TURBINES 2 (the turbines are split over two walls; S = one wall)" }
 local walls = {}   -- role -> { name, p, canvas, scaleFor }
 
 local function loadWalls()
@@ -567,7 +568,8 @@ local FITS = {
   end,
   turbines = function(w, h, list) return w >= 2 * CARD_W + 1 and turbineRows(w, list) <= h end,
 }
-local DRAW = { main = drawMain, reactors = drawReactors, turbines = drawTurbines }
+local DRAW = { main = drawMain, reactors = drawReactors, turbines = drawTurbines, turbines2 = drawTurbines }
+FITS.turbines2 = FITS.turbines
 
 local function fitKey(role, list)
   if role == "main" or role == "reactors" then return #list end
@@ -576,9 +578,24 @@ local function fitKey(role, list)
   return table.concat(parts, ",")
 end
 
+-- With a second turbines wall, the reactors are shared out between the two (in order, each
+-- reactor's turbines kept together), so each wall holds about half of them.
+local function turbineShare(role, list)
+  if not walls.turbines or not walls.turbines2 then return list end
+  local total = 0
+  for _, r in ipairs(list) do total = total + #r.turbines end
+  local first, second, sum = {}, {}, 0
+  for _, r in ipairs(list) do
+    if sum < total / 2 then first[#first + 1] = r else second[#second + 1] = r end
+    sum = sum + #r.turbines
+  end
+  return role == "turbines" and first or second
+end
+
 local function drawWall(role, list)
   local wall = walls[role]
   if not wall then return end
+  if role == "turbines" or role == "turbines2" then list = turbineShare(role, list) end
   local ok = pcall(function()
     local p = wall.p
     local key = fitKey(role, list)
