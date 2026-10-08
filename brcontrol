@@ -11,7 +11,7 @@
 -- when the power is needed again. Stood-down turbines are kept at speed with their coils off,
 -- so they make full power as soon as they're back.
 
-local VERSION = "v8"
+local VERSION = "v8.1"
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
@@ -29,6 +29,10 @@ local CFG = {
   textScale     = 0,     -- monitor text size 0.5-5; 0 = the biggest that fits
   monitorOrder  = { "right", "monitor_6", "monitor_4", "monitor_5" },  -- empty {} = by name.
                          -- The first is the overview, the rest show the turbines.
+  reportURL     = "https://brlink.tailbdc4d5.ts.net",  -- the brlink relay; "" = don't report.
+                         -- Readings are sent there after every update, but only if this computer
+                         -- has a "brlink.key" file. They're filed under the computer's label
+                         -- (label set marsA), or "reactor-<id>" without one.
 }
 
 ---------------------------------------------------------------------------------------------------
@@ -86,6 +90,7 @@ local tanks = {}      -- { name, p } fluid tanks read through OpenPeripherals
 local storage = {}    -- fluid name -> { amount, capacity, count }
 local rodCount = 0
 local rodCache = {}
+local link = { state = "off", pending = nil, since = 0 }   -- reporting to the brlink relay
 
 local function naturalLess(a, b)
   local pa, na = a:match("^(.-)(%d*)$")
@@ -762,8 +767,95 @@ local function drawTerminal()
   print("Power:    " .. commas(totals.rf or 0) .. " RF/t")
   print(string.format("Turbines: %d running, %d standby, %d offline", totals.running or 0, totals.standby or 0, totals.offline or 0))
   print("Monitors: " .. #monitors)
+  print("Link:     " .. link.state)
   print("")
   print("Press Q to stop (the reactor keeps its rods).")
+end
+
+---------------------------------------------------------------------------------------------------
+-- reporting to the brlink relay (for dashboards elsewhere, e.g. on another planet)
+
+local function reportName()
+  local l = (os.getComputerLabel() or ""):gsub("[^%w_-]", "")
+  if l ~= "" then return l:sub(1, 32) end
+  return "reactor-" .. os.getComputerID()
+end
+
+local function readKey()
+  local h = fs.open("brlink.key", "r")
+  if not h then return nil end
+  local k = (h.readAll() or ""):gsub("%s", "")
+  h.close()
+  return k ~= "" and k or nil
+end
+
+-- A compact Lua table literal (textutils.serialize adds a lot of whitespace).
+local function ser(v)
+  local kind = type(v)
+  if kind == "number" then
+    if v ~= v or v == math.huge or v == -math.huge then return "nil" end
+    return tostring(math.floor(v * 1000 + 0.5) / 1000)
+  elseif kind == "string" then
+    return string.format("%q", v)
+  elseif kind == "boolean" then
+    return tostring(v)
+  elseif kind == "table" then
+    local parts = {}
+    if #v > 0 then
+      for _, x in ipairs(v) do parts[#parts + 1] = ser(x) end
+    else
+      for k, x in pairs(v) do parts[#parts + 1] = k .. "=" .. ser(x) end
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+  end
+  return "nil"
+end
+
+-- Sends the latest readings, without waiting for the answer: it arrives as an http_success or
+-- http_failure event in the main loop. (No request headers: CC 1.63 can't send them with a POST,
+-- so the key goes on the first line.)
+local function report(now)
+  if CFG.reportURL == "" or not http then link.state = "off"; return end
+  if link.pending then
+    if now - link.since < 30 then return end
+    link.pending, link.state = nil, "no answer from the relay"
+  end
+  local key = readKey()
+  if not key then link.state = "off (no brlink.key file)"; return end
+  local list = {}
+  for _, t in ipairs(turbines) do
+    list[#list + 1] = { n = t.label, ok = t.ok and true or false, state = t.state or "?", rpm = t.rpm,
+                        rf = t.rf, flow = t.flow, buffer = t.buffer, coils = t.coils and true or false }
+  end
+  local body = ser({
+    v = VERSION, up = now - startTime, day = os.day(), time = os.time(),
+    reactor = {
+      ok = R.ok, active = R.active and true or false, rods = rods, control = controlNote,
+      steamMade = R.steamMade, demand = demand, steam = R.steam, steamMax = R.steamMax,
+      water = R.water, waterMax = R.waterMax, fuelTemp = R.fuelTemp, caseTemp = R.caseTemp,
+      fuel = R.fuel, fuelMax = R.fuelMax, waste = R.waste, burn = R.burn, reactivity = R.reactivity,
+    },
+    totals = totals,
+    turbines = list,
+  })
+  local url = CFG.reportURL .. "/report/" .. reportName()
+  if pcall(http.request, url, key .. "\n" .. body) then
+    link.pending, link.since = url, now
+    if link.state:sub(1, 2) ~= "ok" then link.state = "connecting..." end
+  else
+    link.state = "this computer can't use http"
+  end
+end
+
+local function linkAnswer(event, url, handle)
+  if url ~= link.pending then return end
+  link.pending = nil
+  if handle then pcall(handle.close) end
+  if event == "http_success" then
+    link.state = "ok, as " .. reportName()
+  else
+    link.state = "refused (wrong key?) or the relay is down"
+  end
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -810,6 +902,7 @@ local function tick(now)
     if #history > 400 then table.remove(history, 1) end
     lastHistory = now
   end
+  report(now)
   drawAll()
   drawTerminal()
 end
@@ -818,8 +911,10 @@ scan()
 local rescanAt = os.clock() + 60
 local timer = os.startTimer(0)
 while true do
-  local event, p1 = os.pullEventRaw()
-  if event == "timer" and p1 == timer then
+  local event, p1, p2 = os.pullEventRaw()
+  if event == "http_success" or event == "http_failure" then
+    linkAnswer(event, p1, p2)
+  elseif event == "timer" and p1 == timer then
     local now = os.clock()
     -- Look for added or removed machines once a minute (and when a modem reports a change).
     if now >= rescanAt then pcall(scan); rescanAt = now + 60 end
