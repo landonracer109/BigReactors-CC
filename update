@@ -1,0 +1,93 @@
+-- update: installs the newest brcontrol from GitHub as this computer's startup, then reboots.
+-- ComputerCraft 1.63.
+--
+--   update            newest version, this computer
+--   update <commit>   that version (a commit id from GitHub), this computer
+--   update all        every controller that reports to the brlink relay updates itself to the
+--                     newest version within a few seconds (needs a brlink.key file here)
+--
+-- brcontrol runs "update <commit>" by itself when the relay passes on an "update all".
+
+local REPO = "landonracer109/BigReactors-CC"
+local RELAY = "https://brlink.tailbdc4d5.ts.net"
+local PROGRAM, TARGET, SHA_FILE = "brcontrol", "startup", "brcontrol.sha"
+local args = { ... }
+
+local function fetch(url)
+  local r = http.get(url)
+  if not r then return nil end
+  local text = r.readAll()
+  r.close()
+  return text
+end
+
+-- The newest commit on GitHub (asking the API avoids raw.githubusercontent's few-minute cache).
+local function newestCommit()
+  local json = fetch("https://api.github.com/repos/" .. REPO .. "/commits/master")
+  return json and json:match('"sha"%s*:%s*"(%x+)"')
+end
+
+if not http then
+  print("The http API is off on this server.")
+  return
+end
+
+local sha = args[1]
+if sha == nil or sha == "all" then
+  write("Asking GitHub for the newest version... ")
+  sha = newestCommit()
+  if not sha then
+    print("no answer. Try again in a minute.")
+    return
+  end
+  sha = sha:sub(1, 7)
+  print(sha)
+end
+
+if args[1] == "all" then
+  local h = fs.open("brlink.key", "r")
+  if not h then
+    print("No brlink.key file on this computer, so the relay won't take the request.")
+    return
+  end
+  local key = (h.readAll() or ""):gsub("%s", "")
+  h.close()
+  -- the key goes on the first line: CC 1.63 can't send headers with a POST
+  local r = http.post(RELAY .. "/command", key .. "\n" .. textutils.serialize({ update = sha }))
+  if not r then
+    print("The relay refused it (wrong key?) or isn't reachable.")
+    return
+  end
+  r.close()
+  print("Sent. Every controller updates to " .. sha .. " within a few seconds,")
+  print("and shows it on its screen after it restarts.")
+  print("Watch them on " .. RELAY)
+  return
+end
+
+if not sha:match("^%x+$") then
+  print("Usage: update | update <commit> | update all")
+  return
+end
+
+write("Downloading " .. PROGRAM .. " " .. sha .. "... ")
+local code = fetch("https://raw.githubusercontent.com/" .. REPO .. "/" .. sha .. "/" .. PROGRAM)
+if not code or not code:find("brcontrol", 1, true) then
+  print("failed. Nothing was changed.")
+  return
+end
+if not loadstring(code, PROGRAM) then
+  print("it doesn't load. Nothing was changed.")
+  return
+end
+print("ok")
+
+local h = fs.open(TARGET, "w")
+h.write(code)
+h.close()
+h = fs.open(SHA_FILE, "w")
+h.write(sha)
+h.close()
+print("Installed as " .. TARGET .. ". Restarting...")
+sleep(1)
+os.reboot()

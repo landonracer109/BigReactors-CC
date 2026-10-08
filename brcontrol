@@ -11,7 +11,13 @@
 -- when the power is needed again. Stood-down turbines are kept at speed with their coils off,
 -- so they make full power as soon as they're back.
 
-local VERSION = "v8.2"
+local VERSION = "v8.3"
+-- the GitHub commit this copy came from, written by the update program (nil if installed by hand)
+local COMMIT = nil
+do
+  local h = fs and fs.open("brcontrol.sha", "r")
+  if h then COMMIT = (h.readAll() or ""):match("%x+"); h.close() end
+end
 
 local CFG = {
   turbineFlow   = 2000,  -- mB/t of steam each running turbine takes
@@ -771,7 +777,7 @@ local function drawTerminal()
   term.setBackgroundColour(colours.black)
   term.clear()
   term.setCursorPos(1, 1)
-  print("brcontrol " .. VERSION .. " - reactor + turbine controller")
+  print("brcontrol " .. VERSION .. (COMMIT and (" (" .. COMMIT .. ")") or "") .. " - reactor + turbine controller")
   print("")
   print("Reactor:  " .. (R.ok and ((R.active and "online" or "offline") .. ", rods " .. dec(rods or 0, 1) .. "%") or "not connected"))
   print("Steam:    " .. commas(R.steamMade or 0) .. " made / " .. commas(demand) .. " wanted mB/t")
@@ -841,7 +847,7 @@ local function report(now)
                         rf = t.rf, flow = t.flow, buffer = t.buffer, coils = t.coils and true or false }
   end
   local body = ser({
-    v = VERSION, up = now - startTime, day = os.day(), time = os.time(),
+    v = VERSION, sha = COMMIT, up = now - startTime, day = os.day(), time = os.time(),
     reactor = {
       ok = R.ok, active = R.active and true or false, rods = rods, control = controlNote,
       steamMade = R.steamMade, demand = demand, steam = R.steam, steamMax = R.steamMax,
@@ -860,14 +866,34 @@ local function report(now)
   end
 end
 
+-- The relay answers "ok", or "update <commit>" after someone ran "update all": then the update
+-- program installs that version and reboots (once per version, so a failed download doesn't
+-- retry every few seconds).
 local function linkAnswer(event, url, handle)
   if url ~= link.pending then return end
   link.pending = nil
-  if handle then pcall(handle.close) end
-  if event == "http_success" then
-    link.state = "ok, as " .. reportName()
-  else
+  local answer = ""
+  if handle then
+    local ok, text = pcall(handle.readAll)
+    answer = ok and text or ""
+    pcall(handle.close)
+  end
+  if event ~= "http_success" then
     link.state = "refused (wrong key?) or the relay is down"
+    return
+  end
+  link.state = "ok, as " .. reportName()
+  local sha = answer:match("^update (%x+)")
+  if sha and sha ~= COMMIT and sha ~= link.triedUpdate then
+    link.triedUpdate = sha
+    if fs.exists("update") and shell then
+      term.clear(); term.setCursorPos(1, 1)
+      print("Updating to " .. sha .. " (asked through the relay)...")
+      shell.run("update", sha)   -- reboots when it works
+      link.state = "update to " .. sha .. " failed; still running " .. (COMMIT or VERSION)
+    else
+      link.state = "asked to update, but there's no update program"
+    end
   end
 end
 
