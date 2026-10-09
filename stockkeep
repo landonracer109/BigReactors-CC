@@ -400,9 +400,43 @@ end
 ---------------------------------------------------------------------------------------------------
 -- the computer's own screen: what needs attention
 
--- AE1 does not translate its item names on the server, so they arrive as internal keys
--- ("AppEng.Blocks.OreQuartz"); these are its English names, from its own language file.
+-- AE1 and Nether Ores don't translate their item names on the server, so they arrive as internal
+-- keys ("AppEng.Blocks.OreQuartz", "tile.netherores.ore.iron"); these are their English names, from
+-- the mods' own language files. Anything else like that gets a readable guess (displayName).
 local AE_NAMES = {
+  -- Nether Ores (same problem, from its en_US.lang)
+  ["tile.netherores.ore.coal"] = "Nether Coal Ore",
+  ["tile.netherores.ore.diamond"] = "Nether Diamond Ore",
+  ["tile.netherores.ore.gold"] = "Nether Gold Ore",
+  ["tile.netherores.ore.iron"] = "Nether Iron Ore",
+  ["tile.netherores.ore.lapis"] = "Nether Lapis Ore",
+  ["tile.netherores.ore.redstone"] = "Nether Redstone Ore",
+  ["tile.netherores.ore.tin"] = "Nether Tin Ore",
+  ["tile.netherores.ore.copper"] = "Nether Copper Ore",
+  ["tile.netherores.ore.emerald"] = "Nether Emerald Ore",
+  ["tile.netherores.ore.silver"] = "Nether Silver Ore",
+  ["tile.netherores.ore.lead"] = "Nether Lead Ore",
+  ["tile.netherores.ore.uranium"] = "Nether Uranium Ore",
+  ["tile.netherores.ore.nikolite"] = "Nether Nikolite Ore",
+  ["tile.netherores.ore.ruby"] = "Nether Ruby Ore",
+  ["tile.netherores.ore.peridot"] = "Nether Peridot Ore",
+  ["tile.netherores.ore.sapphire"] = "Nether Sapphire Ore",
+  ["tile.netherores.ore.platinum"] = "Nether Platinum Ore",
+  ["tile.netherores.ore.nickel"] = "Nether Ferrous Ore",
+  ["tile.netherores.ore.steel"] = "Nether Pig Iron Ore",
+  ["tile.netherores.ore.iridium"] = "Nether Iridium Ore",
+  ["tile.netherores.ore.osmium"] = "Nether Osmium Ore",
+  ["tile.netherores.ore.sulfur"] = "Nether Sulfur Ore",
+  ["tile.netherores.ore.titanium"] = "Nether Titanium Ore",
+  ["tile.netherores.ore.mythril"] = "Nether Mythril Ore",
+  ["tile.netherores.ore.adamantium"] = "Nether Adamantium Ore",
+  ["tile.netherores.ore.rutile"] = "Nether Rutile Ore",
+  ["tile.netherores.ore.tungsten"] = "Nether Tungsten Ore",
+  ["tile.netherores.ore.amber"] = "Nether Amber Ore",
+  ["tile.netherores.ore.tennantite"] = "Nether Tennantite Ore",
+  ["tile.netherores.ore.salt"] = "Nether Salt Ore",
+  ["tile.netherores.ore.saltpeter"] = "Nether Saltpeter Ore",
+  -- Applied Energistics
   ["AppEng.Items.0k"] = "ME Creative Cell",
   ["AppEng.Items.1k"] = "ME 1k Storage",
   ["AppEng.Items.4k"] = "ME 4k Storage",
@@ -508,7 +542,19 @@ local AE_NAMES = {
 }
 
 local function displayName(name)
-  return AE_NAMES[name] or AE_NAMES[(name:gsub("%.name$", ""))] or name
+  local base = name:gsub("%.name$", "")
+  local known = AE_NAMES[name] or AE_NAMES[base]
+  if known then return known end
+  -- any other untranslated key (tile.mod.thing / item.mod.thing): make a readable guess from it
+  if base:find("^tile%.") or base:find("^item%.") then
+    local words = {}
+    for part in base:gmatch("[^%.]+") do words[#words + 1] = part end
+    table.remove(words, 1)                                   -- "tile" / "item"
+    if #words > 1 then table.remove(words, 1) end            -- the mod's name
+    local s = table.concat(words, " "):gsub("(%l)(%u)", "%1 %2"):gsub("_", " ")
+    return (s:gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b end))
+  end
+  return name
 end
 
 local function statusColour(st)
@@ -638,6 +684,7 @@ local function drawMonitor(m)
     m.setCursorPos(2, y); m.setTextColour(colours.white)
     local shown = displayName(e.name)
     m.write(#shown > nameW and (shown:sub(1, nameW - 1) .. ".") or shown)
+    ui.hits[#ui.hits + 1] = { x1 = 2, x2 = nameW + 1, y = y, action = "name", e = e }
     m.setCursorPos(cKeep, y); m.setTextColour(colours.lightBlue)
     m.write((e.have and compact(e.have) or "?") .. " / " .. compact(e.keep))
     button(m, cHow, y, (" " .. methodLabel(e) .. string.rep(" ", 14)):sub(1, 15), colours.blue, "how", e)
@@ -705,6 +752,8 @@ local function touch(x, y)
       local e = hit.e
       if hit.action ~= "remove" then ui.confirm = nil end
       if hit.action == "add" then addFromChest()
+      elseif hit.action == "name" then
+        ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from)) or "")
       elseif hit.action == "prev" then ui.page = math.max(1, ui.page - 1)
       elseif hit.action == "next" then ui.page = ui.page + 1
       elseif hit.action == "less" then e.keep = stepKeep(e.keep, -1); saveList()
