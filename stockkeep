@@ -566,7 +566,9 @@ local function touch(x, y)
         local mth = METHODS[nextIdx]
         if mth:sub(1, 3) == "rs:" then e.how, e.side = "redstone", mth:sub(4) else e.how, e.side = mth, nil end
         if (e.how == "smelt" or e.how == "pulverize") and not e.from then
-          ui.message = e.name .. " has no input yet: remove it and add it again with its input in chest slot 2."
+          ui.message = e.how .. " makes " .. e.name .. " to a target and needs its input (chest slot 2). Keep tapping for " .. e.how .. " all."
+        else
+          ui.message = e.name .. ": " .. methodLabel(e) .. "."
         end
         sent[e.name] = nil
         saveList()
