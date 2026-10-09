@@ -26,10 +26,12 @@ local CFG = {
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
   rescan        = 600,       -- seconds between looking up item names in AE
+  addChest      = "top",     -- side of this computer with the chest used to add items
 }
 
+-- The starting list (used until you edit it on the monitor; then it lives in stockkeep.list).
 -- name = exactly as shown in game; keep = target; tier = refill order (low first)
-local LIST = {
+local DEFAULTS = {
   -- Applied Energistics
   { name = "Certus Quartz Dust", keep = 2048, tier = 1, how = "pulverize", from = "Certus Quartz", per = 1 },
   { name = "Silicon", keep = 4096, tier = 2, how = "smelt", from = "Certus Quartz Dust", per = 1 },
@@ -148,11 +150,37 @@ local function saveIds()
   if h then h.write(textutils.serialize(ids)); h.close() end
 end
 
+-- the list itself: stockkeep.list once it has been edited, the defaults until then
+local LIST_FILE = "stockkeep.list"
+local LIST = {}
+
+local function saveList()
+  local out = {}
+  for _, e in ipairs(LIST) do
+    out[#out + 1] = { name = e.name, keep = e.keep, tier = e.tier, how = e.how, from = e.from, per = e.per, side = e.side }
+  end
+  local h = fs.open(LIST_FILE, "w")
+  if h then h.write(textutils.serialize(out)); h.close() end
+end
+
+local function loadList()
+  local h = fs.open(LIST_FILE, "r")
+  local t = nil
+  if h then t = textutils.unserialize(h.readAll() or ""); h.close() end
+  LIST = {}
+  for _, e in ipairs(type(t) == "table" and t or DEFAULTS) do
+    LIST[#LIST + 1] = { name = e.name, keep = e.keep, tier = e.tier, how = e.how, from = e.from, per = e.per or 1, side = e.side }
+  end
+end
+
 local wanted, byName = {}, {}
-for _, e in ipairs(LIST) do
-  wanted[e.name] = true
-  byName[e.name] = e
-  if e.from then wanted[e.from] = true end
+local function reindex()
+  wanted, byName = {}, {}
+  for _, e in ipairs(LIST) do
+    wanted[e.name] = true
+    byName[e.name] = e
+    if e.from then wanted[e.from] = true end
+  end
 end
 
 local function scanIds()
@@ -298,58 +326,206 @@ local function step()
 end
 
 ---------------------------------------------------------------------------------------------------
--- screen: the computer's own, plus a monitor if one is attached
+-- the computer's own screen: what needs attention
 
-local function draw(dev)
-  local w, h = dev.getSize()
-  dev.setBackgroundColour(colours.black)
-  dev.clear()
-  dev.setCursorPos(1, 1)
-  dev.setTextColour(colours.yellow)
-  dev.write("stockkeep  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller: won't wait for your jobs)"))
-  local y = 3
+local function statusColour(st)
+  if not st then return colours.white end
+  if st:find("STUCK") or st:find("never") or st:find("failed") or st:find("can't") then return colours.red end
+  if st:find("waiting") then return colours.lightGrey end
+  if st == "ok" then return colours.lime end
+  return colours.white
+end
+
+local function drawTerm()
+  local w, h = term.getSize()
+  term.setBackgroundColour(colours.black)
+  term.clear()
+  term.setCursorPos(1, 1)
+  term.setTextColour(colours.yellow)
+  term.write("stockkeep  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller)"))
   local low, ok = {}, 0
   for _, e in ipairs(LIST) do
     if status[e.name] == "ok" then ok = ok + 1 else low[#low + 1] = e end
   end
-  dev.setCursorPos(1, 2)
-  dev.setTextColour(colours.lightGrey)
-  dev.write(ok .. " of " .. #LIST .. " stocked. " .. lastWork)
+  term.setCursorPos(1, 2)
+  term.setTextColour(colours.lightGrey)
+  term.write(ok .. " of " .. #LIST .. " stocked. " .. lastWork)
+  local y = 3
   for _, e in ipairs(low) do
     if y > h then break end
     local st = status[e.name] or ""
-    local colour = colours.white
-    if st:find("STUCK") or st:find("never") or st:find("failed") or st:find("can't") then colour = colours.red
-    elseif st:find("waiting") then colour = colours.lightGrey end
-    dev.setCursorPos(1, y)
-    dev.setTextColour(colours.white)
-    local name = e.name
-    if #name > 24 then name = name:sub(1, 23) .. "." end
-    dev.write(name)
-    dev.setCursorPos(26, y)
-    dev.setTextColour(colours.lightBlue)
-    dev.write((e.have and commas(e.have) or "?") .. "/" .. commas(e.keep))
-    dev.setCursorPos(42, y)
-    dev.setTextColour(colour)
-    dev.write(st:sub(1, math.max(1, w - 41)))
+    term.setCursorPos(1, y); term.setTextColour(colours.white)
+    term.write(#e.name > 20 and (e.name:sub(1, 19) .. ".") or e.name)
+    term.setCursorPos(22, y); term.setTextColour(colours.lightBlue)
+    term.write((e.have and commas(e.have) or "?") .. "/" .. commas(e.keep))
+    term.setCursorPos(36, y); term.setTextColour(statusColour(st))
+    term.write(st:sub(1, math.max(1, w - 35)))
     y = y + 1
   end
 end
 
-local function drawAll()
-  pcall(draw, term)
+---------------------------------------------------------------------------------------------------
+-- the monitor: the whole list, edited by touch
+
+local LADDER = { 0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536 }
+local METHODS = { "craft", "smelt", "pulverize", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
+local ui = { page = 1, hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0 }
+
+local function methodLabel(e)
+  if e.how == "redstone" then return "rs:" .. (e.side or "?") end
+  return e.how
+end
+
+local function stepKeep(keep, dir)
+  if dir > 0 then
+    for _, v in ipairs(LADDER) do if v > keep then return v end end
+    return keep
+  end
+  for i = #LADDER, 1, -1 do if LADDER[i] < keep then return LADDER[i] end end
+  return 0
+end
+
+local function button(dev, x, y, label, bg, action, e)
+  dev.setCursorPos(x, y)
+  dev.setBackgroundColour(bg)
+  dev.setTextColour(colours.white)
+  dev.write(label)
+  dev.setBackgroundColour(colours.black)
+  ui.hits[#ui.hits + 1] = { x1 = x, x2 = x + #label - 1, y = y, action = action, e = e }
+end
+
+local function drawMonitor(m)
+  m.setTextScale(0.5)
+  local w, h = m.getSize()
+  m.setBackgroundColour(colours.black)
+  m.clear()
+  ui.hits = {}
+  m.setCursorPos(1, 1); m.setTextColour(colours.yellow); m.write("STOCKKEEP")
+  button(m, 12, 1, " Add from chest ", colours.green, "add")
+  local rows = h - 4
+  local pages = math.max(1, math.ceil(#LIST / rows))
+  if ui.page > pages then ui.page = pages end
+  button(m, 30, 1, " < ", colours.grey, "prev")
+  m.setCursorPos(34, 1); m.setTextColour(colours.lightGrey); m.write(ui.page .. "/" .. pages)
+  button(m, 39, 1, " > ", colours.grey, "next")
+  m.setCursorPos(1, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w))
+  local nameW = math.max(10, w - 64)
+  local cKeep, cHow, cTier, cBtn, cSt = nameW + 2, nameW + 21, nameW + 33, nameW + 37, nameW + 51
+  m.setCursorPos(1, 3); m.setTextColour(colours.grey)
+  m.write("ITEM"); m.setCursorPos(cKeep, 3); m.write("HAVE / KEEP"); m.setCursorPos(cHow, 3); m.write("HOW")
+  m.setCursorPos(cTier, 3); m.write("T"); m.setCursorPos(cSt, 3); m.write("STATUS")
+  local first = (ui.page - 1) * rows + 1
+  for i = first, math.min(#LIST, first + rows - 1) do
+    local e, y = LIST[i], 4 + i - first
+    m.setCursorPos(1, y); m.setTextColour(colours.white)
+    m.write(#e.name > nameW and (e.name:sub(1, nameW - 1) .. ".") or e.name)
+    m.setCursorPos(cKeep, y); m.setTextColour(colours.lightBlue)
+    m.write((e.have and commas(e.have) or "?") .. " / " .. commas(e.keep))
+    button(m, cHow, y, (" " .. methodLabel(e) .. string.rep(" ", 10)):sub(1, 11), colours.blue, "how", e)
+    button(m, cTier, y, " " .. e.tier .. " ", colours.purple, "tier", e)
+    button(m, cBtn, y, " - ", colours.grey, "less", e)
+    button(m, cBtn + 4, y, " + ", colours.grey, "more", e)
+    button(m, cBtn + 8, y, ui.confirm == e and "sure?" or " x ", colours.red, "remove", e)
+    m.setCursorPos(cSt, y); m.setTextColour(statusColour(status[e.name]))
+    m.write((status[e.name] or ""):sub(1, math.max(1, w - cSt + 1)))
+  end
+end
+
+local function monitors()
+  local list = {}
   for _, name in ipairs(peripheral.getNames()) do
-    if peripheral.getType(name) == "monitor" then
-      local m = peripheral.wrap(name)
-      pcall(function() m.setTextScale(0.5); draw(m) end)
+    if peripheral.getType(name) == "monitor" then list[#list + 1] = peripheral.wrap(name) end
+  end
+  return list
+end
+
+local function drawAll()
+  pcall(drawTerm)
+  for _, m in ipairs(monitors()) do
+    if m.isColour and m.isColour() then pcall(drawMonitor, m) end
+  end
+end
+
+-- The chest for adding items: on CFG.addChest (default on top of this computer).
+local function chestStacks()
+  local c = peripheral.wrap(CFG.addChest)
+  if not c or not c.getAllStacks then return nil end
+  local ok, all = pcall(c.getAllStacks)
+  if not ok or type(all) ~= "table" then return nil end
+  if all[0] ~= nil then          -- some versions count slots from 0
+    local shifted = {}
+    for k, v in pairs(all) do shifted[k + 1] = v end
+    all = shifted
+  end
+  return all
+end
+
+local function addFromChest()
+  local stacks = chestStacks()
+  if not stacks then ui.message = "No chest on the " .. CFG.addChest .. " of this computer."; return end
+  local item, input = stacks[1], stacks[2]
+  if type(item) ~= "table" or not item.name or item.name == "empty" then
+    ui.message = "Put the item in slot 1 of the chest (and its input in slot 2 to smelt or pulverize it)."
+    return
+  end
+  if byName[item.name] then ui.message = item.name .. " is already on the list."; return end
+  ids[item.name] = { id = item.id, dmg = item.dmg }
+  local e = { name = item.name, keep = 256, tier = 5, how = "craft", per = 1 }
+  if type(input) == "table" and input.name and input.name ~= "empty" then
+    ids[input.name] = { id = input.id, dmg = input.dmg }
+    e.from, e.how, e.tier = input.name, "smelt", 2
+  end
+  LIST[#LIST + 1] = e
+  saveIds(); saveList(); reindex()
+  ui.message = "Added " .. item.name .. (e.from and (" (from " .. e.from .. ")") or "") .. ". Set its amount with + and its method by tapping it."
+end
+
+local function touch(x, y)
+  for _, hit in ipairs(ui.hits) do
+    if y == hit.y and x >= hit.x1 and x <= hit.x2 then
+      local e = hit.e
+      if hit.action ~= "remove" then ui.confirm = nil end
+      if hit.action == "add" then addFromChest()
+      elseif hit.action == "prev" then ui.page = math.max(1, ui.page - 1)
+      elseif hit.action == "next" then ui.page = ui.page + 1
+      elseif hit.action == "less" then e.keep = stepKeep(e.keep, -1); saveList()
+      elseif hit.action == "more" then e.keep = stepKeep(e.keep, 1); saveList()
+      elseif hit.action == "tier" then e.tier = e.tier % 9 + 1; saveList()
+      elseif hit.action == "how" then
+        if e.how == "redstone" then rs.setOutput(e.side, false) end
+        local cur = methodLabel(e)
+        local nextIdx = 1
+        for i, mth in ipairs(METHODS) do if mth == cur then nextIdx = i % #METHODS + 1 end end
+        local mth = METHODS[nextIdx]
+        if mth:sub(1, 3) == "rs:" then e.how, e.side = "redstone", mth:sub(4) else e.how, e.side = mth, nil end
+        if (e.how == "smelt" or e.how == "pulverize") and not e.from then
+          ui.message = e.name .. " has no input yet: remove it and add it again with its input in chest slot 2."
+        end
+        sent[e.name] = nil
+        saveList()
+      elseif hit.action == "remove" then
+        if ui.confirm == e and os.clock() - ui.confirmAt < 5 then
+          if e.how == "redstone" then rs.setOutput(e.side, false) end
+          for i, other in ipairs(LIST) do if other == e then table.remove(LIST, i); break end end
+          ui.confirm = nil
+          saveList(); reindex()
+          ui.message = "Removed " .. e.name .. "."
+        else
+          ui.confirm, ui.confirmAt = e, os.clock()
+        end
+      end
+      return true
     end
   end
+  return false
 end
 
 ---------------------------------------------------------------------------------------------------
 -- main loop
 
 loadIds()
+loadList()
+reindex()
 findAE()
 if not ae then
   print("No ME block found. Put a wired modem on an ME Interface (and this computer), right-click")
@@ -360,7 +536,7 @@ scanIds()
 local lastScan = os.clock()
 local timer = os.startTimer(0)
 while true do
-  local event, p1 = os.pullEventRaw()
+  local event, p1, p2, p3 = os.pullEventRaw()
   if event == "timer" and p1 == timer then
     if not ae then findAE() end
     if ae then
@@ -370,6 +546,8 @@ while true do
     end
     drawAll()
     timer = os.startTimer(CFG.check)
+  elseif event == "monitor_touch" then
+    if touch(p2, p3) then drawAll() end
   elseif event == "peripheral" or event == "peripheral_detach" then
     findAE()
   elseif (event == "key" and p1 == keys.q) or event == "terminate" then
