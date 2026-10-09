@@ -28,11 +28,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local COMMIT = nil   -- the GitHub commit this copy came from (written by the update program), shown on screen
-do
-  local h = fs.open("stockkeep.sha", "r")
-  if h then COMMIT = (h.readAll() or ""):match("%x+"); h.close() end
-end
+local VERSION = "v28"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -653,7 +649,7 @@ local function drawTerm()
   term.clear()
   term.setCursorPos(1, 1)
   term.setTextColour(colours.yellow)
-  term.write("stockkeep" .. (COMMIT and (" " .. COMMIT) or "") .. "  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller)"))
+  term.write("stockkeep " .. VERSION .. "  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller)"))
   local low, ok = {}, 0
   for _, e in ipairs(LIST) do
     local st = status[e.name] or ""
@@ -790,7 +786,7 @@ local function drawMonitor(m, name, place)
   -- header: a solid bar with the title and the controls
   band(m, 1, w, colours.blue)
   m.setCursorPos(2, 1); m.setTextColour(colours.yellow); m.write("STOCKKEEP")
-  if COMMIT then m.setCursorPos(w - #COMMIT, 1); m.setTextColour(colours.lightBlue); m.write(COMMIT) end
+  m.setCursorPos(w - #VERSION, 1); m.setTextColour(colours.lightBlue); m.write(VERSION)
   button(m, 13, 1, " Add from chest ", colours.green, "add")
   local rows = h - 4
   ui.rows[name] = rows
