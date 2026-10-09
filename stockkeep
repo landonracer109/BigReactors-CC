@@ -626,7 +626,7 @@ end
 ---------------------------------------------------------------------------------------------------
 -- the monitor: the whole list, edited by touch
 
-local LADDER = { 0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536 }
+local LADDER = { 0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 100000, 250000, 500000, 1000000 }
 local METHODS = { "craft", "smelt", "pulverize", "smelt all", "pulverize all", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
 local ui = { hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0,
              editedAt = -math.huge }
