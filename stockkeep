@@ -29,13 +29,14 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v37"   -- shown on screen; goes up by one with every release
+local VERSION = "v38"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
   smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
   pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
   craftBatch    = 256,       -- most of one item asked for in one crafting request
+  jobStall      = 300,       -- seconds an AE job may go without progress before it's flagged as stuck
   overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
   craftAhead    = 1024,      -- with a controller: keep asking (a chunk per check) while AE has fewer than this queued
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
@@ -278,6 +279,7 @@ local sent = {}       -- name -> what is out: craft requests, or input at the ma
 local lowSince = {}   -- name -> os.clock() when it first went below target
 local status = {}     -- name -> text
 local lastWork = ""
+local aeStuck = nil   -- name of an item whose AE job stopped moving (AE1 then crafts nothing else)
 
 -- AE's crafting jobs, from the ME Controller: "id:dmg" -> how many are still to be made.
 -- (AE1 lists every request still running.) nil without a controller.
@@ -430,6 +432,7 @@ local function step()
     lastWork = why
     return false
   end
+  local stuckNow = nil   -- a job AE has stopped working on (it holds up all of AE's crafting)
   for _, e in ipairs(order) do
     local have = counts[e]
     if have == nil then
@@ -464,7 +467,9 @@ local function step()
             r.lastQ = queued
           end
           if queued == 0 then r.movedAt = nil end
-          local waiting = queued > 0 and r.movedAt and now - r.movedAt > CFG.stuckAfter
+          local waiting = queued > 0 and r.movedAt and now - r.movedAt > CFG.jobStall
+          -- when one AE1 job jams, every job stops; the one that stopped first is the likely cause
+          if waiting and (not stuckNow or r.movedAt < stuckNow.at) then stuckNow = { name = displayName(e.name), at = r.movedAt } end
           local need = e.keep - have - queued
           if r.retryAt and now >= r.retryAt then r.retryAt, r.dropped = nil, nil end
           if r.retryAt then
@@ -589,6 +594,7 @@ local function step()
       e.have = have
     end
   end
+  aeStuck = stuckNow and stuckNow.name
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -812,7 +818,12 @@ local function drawTerm()
   end
   term.setCursorPos(1, 2)
   term.setTextColour(colours.lightGrey)
-  term.write(ok .. " of " .. #LIST .. " stocked. " .. lastWork)
+  if aeStuck then
+    term.setTextColour(colours.red)
+    term.write("AE STUCK on " .. aeStuck .. ": cancel it in the Crafting Monitor")
+  else
+    term.write(ok .. " of " .. #LIST .. " stocked. " .. lastWork)
+  end
   local y = 3
   for _, e in ipairs(low) do
     if y > h then break end
@@ -977,7 +988,14 @@ local function drawMonitor(m, name, place)
   -- All / Needs: this monitor lists everything, or only what isn't satisfied
   button(m, 45, 1, needsMode and " Needs " or " All ", needsMode and colours.orange or colours.grey, "mode")
   m.setBackgroundColour(colours.black)
-  m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w - 2))
+  if aeStuck then   -- one stuck AE job stops all of AE's crafting: say so loudly
+    band(m, 2, w, colours.red)
+    m.setCursorPos(2, 2); m.setTextColour(colours.white)
+    m.write(("AE STUCK on " .. aeStuck .. ": shift-click it in the ME Crafting Monitor"):sub(1, w - 2))
+    m.setBackgroundColour(colours.black)
+  else
+    m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w - 2))
+  end
   local nameW = math.max(10, w - 63)
   local cKeep, cHow, cTier, cBtn, cSt = nameW + 2, nameW + 16, nameW + 32, nameW + 36, nameW + 50
   -- column headings on a grey band
