@@ -304,6 +304,7 @@ local function step()
           if moved > 0 then
             passedOn[e.name] = (passedOn[e.name] or 0) + moved
             status[e.name] = "sent " .. commas(moved)
+            have = have - moved   -- show what is left after sending
             lastWork = "sent " .. commas(moved) .. " " .. e.name .. " to " .. e.how:sub(1, -5)
           else
             status[e.name] = "can't reach the " .. e.how:sub(1, -5) .. " chest (full?)"
