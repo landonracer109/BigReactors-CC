@@ -28,7 +28,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v28"   -- shown on screen; goes up by one with every release
+local VERSION = "v29"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -37,7 +37,8 @@ local CFG = {
   craftBatch    = 1024,      -- most of one item asked for in one crafting request
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
   flowCheck     = 5,         -- seconds between sends for smelt all / pulverize all
-  trip          = 60,        -- seconds: how long a sent batch counts as still at the machines
+  trip          = 60,        -- seconds: a sent batch counts as still at the machines at least this long
+  quiet         = 15,        -- ... and after that until nothing has arrived for this many seconds
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
   rescan        = 600,       -- seconds between looking up item names in AE
@@ -267,7 +268,7 @@ end
 ---------------------------------------------------------------------------------------------------
 -- the work
 
-local sent = {}       -- name -> { amount, since, startCount } for smelt/pulverize batches
+local sent = {}       -- name -> what is out: craft requests, or input at the machines for smelt/pulverize
 local lowSince = {}   -- name -> os.clock() when it first went below target
 local status = {}     -- name -> text
 local lastWork = ""
@@ -284,35 +285,35 @@ local sentTotal = {}  -- name -> how many smelt all / pulverize all has sent sin
 
 local function process(e, have, short, now)
   -- Several batches can be out at once, so a big furnace line is kept busy. The chest is the
-  -- limit (nothing goes in while it's full); on top of that, what was sent in the last CFG.trip
-  -- seconds and hasn't shown up yet counts as still at the machines, so the target isn't
-  -- overshot by much. Runs every CFG.flowCheck seconds.
+  -- limit (nothing goes in while it's full); on top of that, only what the target still needs
+  -- beyond what is already at the machines is sent. Runs every CFG.flowCheck seconds.
   local s = sent[e.name]
-  if not s then s = { batches = {}, lastHave = have, unanswered = 0 }; sent[e.name] = s end
+  if not s then s = { out = 0, lastHave = have, unanswered = 0 }; sent[e.name] = s end
   -- any rise means the machines are delivering (the total may never rise by a whole batch when
   -- something else uses the item meanwhile, like crafting assemblies pulling the dust)
-  if have > s.lastHave then s.waitingSince, s.unanswered = nil, 0 end
+  if have > s.lastHave then s.waitingSince, s.unanswered, s.lastRise = nil, 0, now end
   s.lastHave = have
   if s.retryAt then
     if now < s.retryAt then
       return "STUCK: " .. displayName(e.from) .. " never came back; retry in " .. math.ceil((s.retryAt - now) / 60) .. " min"
     end
-    s.retryAt, s.waitingSince, s.unanswered, s.batches = nil, nil, 0, {}
+    s.retryAt, s.waitingSince, s.unanswered, s.out = nil, nil, 0, 0
   end
   if s.waitingSince and now - s.waitingSince > CFG.stuckAfter then
     s.retryAt = now + CFG.backoff
     return "STUCK: " .. commas(s.unanswered) .. " " .. displayName(e.from) .. ", none back in " .. math.floor((now - s.waitingSince) / 60) .. " min"
   end
-  -- still at the machines: sent recently, less what has come back since
-  local recent = {}
-  for _, b in ipairs(s.batches) do if now - b.t < CFG.trip then recent[#recent + 1] = b end end
-  s.batches = recent
+  -- still at the machines: everything sent since this row last caught up, less everything that
+  -- came back since then (counting what was passed straight on to the next machine). It stays
+  -- counted while deliveries keep coming, however long the furnace queue is; once nothing has
+  -- arrived for CFG.quiet seconds (and the last send is over CFG.trip seconds old) the machines
+  -- are done and whatever didn't show up went to other uses.
   local inFlight = 0
-  if recent[1] then
-    local total = 0
-    for _, b in ipairs(recent) do total = total + b.n end
-    local arrived = (have - recent[1].have + (passedOn[e.name] or 0) - recent[1].passed) / e.per
-    inFlight = math.max(0, total - math.max(0, arrived))
+  if (s.out or 0) > 0 then
+    local arrived = (have - s.base + (passedOn[e.name] or 0) - s.basePassed) / e.per
+    inFlight = math.max(0, s.out - math.max(0, arrived))
+    local delivering = s.lastRise and now - s.lastRise < CFG.quiet
+    if inFlight <= 0 or (now - s.lastSend >= CFG.trip and not delivering) then s.out, inFlight = 0, 0 end
   end
   local inFlightText = inFlight > 0 and ("processing " .. commas(math.ceil(inFlight * e.per))) or nil
   if not e.from then return "no input: use " .. e.how .. " all, or re-add it" end
@@ -330,7 +331,8 @@ local function process(e, have, short, now)
   local dir = e.how == "smelt" and CFG.smeltChest or CFG.pulverizeChest
   local moved = tonumber(sendTo(fromId, n, dir)) or 0
   if moved <= 0 then return inFlightText or ("waiting: " .. e.how .. " chest full") end
-  s.batches[#s.batches + 1] = { n = moved, t = now, have = have, passed = passedOn[e.name] or 0 }
+  if s.out == 0 then s.base, s.basePassed = have, passedOn[e.name] or 0 end
+  s.out, s.lastSend = s.out + moved, now
   s.waitingSince = s.waitingSince or now
   s.unanswered = s.unanswered + moved
   passedOn[e.from] = (passedOn[e.from] or 0) + moved
