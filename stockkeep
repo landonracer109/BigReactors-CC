@@ -29,7 +29,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v34"   -- shown on screen; goes up by one with every release
+local VERSION = "v35"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -706,6 +706,17 @@ function displayName(name)   -- (declared local above, near the work)
     if #words > 1 then table.remove(words, 1) end            -- the mod's name
     local s = table.concat(words, " "):gsub("(%l)(%u)", "%1 %2"):gsub("_", " ")
     return (s:gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b end))
+  end
+  -- "Mod:thing" keys (Calclavia's "Calclavia:dustSteel"): drop the mod, split the words, and put
+  -- the kind last the way the game does ("Dust Steel" -> "Steel Dust")
+  local rest = base:match("^[%w_]+:(.+)$")
+  if rest then
+    local s = rest:gsub("(%l)(%u)", "%1 %2"):gsub("_", " ")
+    s = s:gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b end)
+    local kind, what = s:match("^(%a+) (.+)$")
+    local kinds = { Dust = true, Ingot = true, Plate = true, Gear = true, Nugget = true, Ore = true, Block = true }
+    if kind and kinds[kind] then s = what .. " " .. kind end
+    return s
   end
   return name
 end
