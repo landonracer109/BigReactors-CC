@@ -285,6 +285,7 @@ local function process(e, have, short, now)
       return "processing " .. commas(s.amount * e.per)
     end
   end
+  if not e.from then return "no input: use " .. e.how .. " all, or re-add it" end
   local fromId = ids[e.from]
   if not fromId then return "needs " .. e.from .. " (never seen)" end
   -- a raw material on the list (how = "watch") is only spent down to its own target;
@@ -393,7 +394,8 @@ local function step()
           end
         end
       elseif e.how == "smelt" or e.how == "pulverize" then
-        status[e.name] = process(e, have, short, now)
+        local ok, st = pcall(process, e, have, short, now)   -- one bad row mustn't stop the rest
+        status[e.name] = ok and st or ("error: " .. tostring(st))
       else
         status[e.name] = "low"
       end
