@@ -28,6 +28,13 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
+local RELAY = "https://brlink.tailbdc4d5.ts.net"   -- checks in here (with a brlink.key) so "update all" reaches it
+local COMMIT = nil   -- the GitHub commit this copy came from, written by the update program
+do
+  local h = fs.open("stockkeep.sha", "r")
+  if h then COMMIT = (h.readAll() or ""):match("%x+"); h.close() end
+end
+
 local CFG = {
   check         = 30,        -- seconds between checks
   smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
@@ -561,17 +568,63 @@ if not ae then
   return
 end
 scanIds()
+
+-- Checking in with the relay (only with a brlink.key): a short status, and the answer may be
+-- "update <commit>" after someone ran "update all" - then the update program installs it.
+local checkin = { pending = nil, since = 0, last = -1000, tried = nil }
+local function checkIn()
+  if not http or not fs.exists("brlink.key") then return end
+  local now = os.clock()
+  if checkin.pending and now - checkin.since < 30 then return end
+  if now - checkin.last < 60 then return end
+  local h = fs.open("brlink.key", "r")
+  local key = (h.readAll() or ""):gsub("%s", "")
+  h.close()
+  local ok = 0
+  for _, e in ipairs(LIST) do if status[e.name] == "ok" then ok = ok + 1 end end
+  local label = (os.getComputerLabel() or ""):gsub("[^%w_-]", "")
+  local name = label ~= "" and label:sub(1, 32) or ("stockkeep-" .. os.getComputerID())
+  local url = RELAY .. "/report/" .. name
+  local body = string.format('{program="stockkeep",sha=%q,stocked=%d,items=%d}', COMMIT or "", ok, #LIST)
+  if pcall(http.request, url, key .. "\n" .. body) then
+    checkin.pending, checkin.since, checkin.last = url, now, now
+  end
+end
+
+local function checkInAnswer(event, url, handle)
+  if url ~= checkin.pending then return end
+  checkin.pending = nil
+  local answer = ""
+  if handle then
+    local ok, text = pcall(handle.readAll)
+    answer = ok and text or ""
+    pcall(handle.close)
+  end
+  local sha = event == "http_success" and answer:match("^update (%x+)")
+  if sha and sha ~= COMMIT and sha ~= checkin.tried and fs.exists("update") and shell then
+    checkin.tried = sha
+    for _, e in ipairs(LIST) do if e.how == "redstone" then rs.setOutput(e.side, false) end end
+    term.setBackgroundColour(colours.black); term.clear(); term.setCursorPos(1, 1)
+    print("Updating to " .. sha .. " (asked through the relay)...")
+    shell.run("update", sha)   -- reboots when it works
+    lastWork = "update to " .. sha .. " failed"
+  end
+end
+
 local lastScan = os.clock()
 local timer = os.startTimer(0)
 while true do
   local event, p1, p2, p3 = os.pullEventRaw()
-  if event == "timer" and p1 == timer then
+  if event == "http_success" or event == "http_failure" then
+    checkInAnswer(event, p1, p2)
+  elseif event == "timer" and p1 == timer then
     if not ae then findAE() end
     if ae then
       if os.clock() - lastScan >= CFG.rescan then scanIds(); lastScan = os.clock() end
       local ok, err = pcall(step)
       if not ok then lastWork = "error: " .. tostring(err) end
     end
+    pcall(checkIn)
     drawAll()
     timer = os.startTimer(CFG.check)
   elseif event == "monitor_touch" then

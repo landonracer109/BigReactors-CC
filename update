@@ -1,4 +1,5 @@
--- update: installs the newest brcontrol from GitHub as this computer's startup, then reboots.
+-- update: installs the newest version of this computer's program (brcontrol, stockkeep or
+-- dashboard, whichever its startup is) from GitHub, then reboots.
 -- ComputerCraft 1.63.
 --
 --   update            newest version, this computer
@@ -6,12 +7,26 @@
 --   update all        every controller that reports to the brlink relay updates itself to the
 --                     newest version within a few seconds (needs a brlink.key file here)
 --
--- brcontrol runs "update <commit>" by itself when the relay passes on an "update all".
+-- brcontrol and stockkeep run "update <commit>" by themselves when the relay passes on an
+-- "update all".
 
 local REPO = "landonracer109/BigReactors-CC"
 local RELAY = "https://brlink.tailbdc4d5.ts.net"
-local PROGRAM, TARGET, SHA_FILE = "brcontrol", "startup", "brcontrol.sha"
+local TARGET = "startup"
+local KNOWN = { brcontrol = true, stockkeep = true, dashboard = true }
 local args = { ... }
+
+-- Which program this computer runs: the name on the first line of its startup ("-- stockkeep: ...").
+local function installedProgram()
+  local h = fs.open(TARGET, "r")
+  if not h then return nil end
+  local first = h.readLine() or ""
+  h.close()
+  local name = first:match("^%-%-%s*(%w+)%s*:")
+  return name and KNOWN[name] and name or nil
+end
+local PROGRAM = installedProgram() or "brcontrol"
+local SHA_FILE = PROGRAM .. ".sha"
 
 local function fetch(url)
   local r = http.get(url)
@@ -72,7 +87,7 @@ end
 
 write("Downloading " .. PROGRAM .. " " .. sha .. "... ")
 local code = fetch("https://raw.githubusercontent.com/" .. REPO .. "/" .. sha .. "/" .. PROGRAM)
-if not code or not code:find("brcontrol", 1, true) then
+if not code or not code:find(PROGRAM, 1, true) then
   print("failed. Nothing was changed.")
   return
 end
