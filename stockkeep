@@ -29,7 +29,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v33"   -- shown on screen; goes up by one with every release
+local VERSION = "v34"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -42,6 +42,7 @@ local CFG = {
   quiet         = 15,        -- ... and after that until nothing has arrived for this many seconds
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
+  startDelay    = 60,        -- seconds after start before anything is crafted or sent (AE loading)
   settle        = 20,        -- seconds after the last tap before the list re-sorts and an edited row starts sending
   dropWait      = 300,       -- seconds to wait after AE dropped a craft three times running
   rescan        = 600,       -- seconds between looking up item names in AE
@@ -360,6 +361,7 @@ end
 -- smelt all / pulverize all: input-driven, like an export bus. Everything above the reserve
 -- (keep) goes to the machine chest, a stack per call until the chest is full; run often.
 local function flow()
+  if os.clock() < CFG.startDelay then return end   -- AE may still be loading (see step)
   local rows = {}   -- a copy: the screen task can change the list while this waits on AE
   for i, e in ipairs(LIST) do rows[i] = e end
   for _, e in ipairs(rows) do
@@ -411,8 +413,23 @@ local function step()
   local order = {}
   for i, e in ipairs(LIST) do order[i] = e end
   table.sort(order, byTier)
+  -- Count everything first. Right after a server restart (or an update) AE often isn't loaded
+  -- yet and reports 0 of everything; crafting against those zeros asked for a whole batch of
+  -- items that were already there, once per reboot. So nothing happens in the first
+  -- CFG.startDelay seconds, nor while every listed item reads 0.
+  local counts, nonzero = {}, 0
   for _, e in ipairs(order) do
-    local have = count(e.name)
+    counts[e] = count(e.name)
+    if (counts[e] or 0) > 0 then nonzero = nonzero + 1 end
+  end
+  if now < CFG.startDelay or (nonzero == 0 and #order >= 3) then
+    local why = now < CFG.startDelay and ("starting up (" .. math.ceil(CFG.startDelay - now) .. " s)") or "AE reads empty: waiting"
+    for _, e in ipairs(order) do status[e.name] = why end
+    lastWork = why
+    return false
+  end
+  for _, e in ipairs(order) do
+    local have = counts[e]
     if have == nil then
       status[e.name] = "never seen: put one in AE"
       if e.how == "redstone" then rs.setOutput(e.side, false) end
