@@ -298,10 +298,21 @@ local function process(e, have, short, now)
       sent[e.name] = nil
     elseif gained >= s.amount * e.per or have >= e.keep then
       sent[e.name] = nil
-    elseif now - s.since > CFG.stuckAfter then
-      s.retryAt = now + CFG.backoff
-      return "STUCK: " .. commas(s.amount) .. " " .. displayName(e.from) .. " sent " .. math.floor((now - s.since) / 60) .. " min ago"
     else
+      -- The total can't show the whole batch coming back when something else uses the item at the
+      -- same time (crafting assemblies pulls the dust being pulverized). So watch for arrivals:
+      -- any rise since the last check means the machines are delivering.
+      if have > (s.lastHave or s.startCount) then s.lastMove = now end
+      s.lastHave = have
+      local quiet = now - (s.lastMove or s.since)
+      if quiet > CFG.stuckAfter then
+        if not s.lastMove then
+          s.retryAt = now + CFG.backoff
+          return "STUCK: " .. commas(s.amount) .. " " .. displayName(e.from) .. ", none back in " .. math.floor(quiet / 60) .. " min"
+        end
+        sent[e.name] = nil   -- deliveries came and stopped: the rest went to other uses; carry on
+        return "batch done (some used meanwhile)"
+      end
       return "processing " .. commas(s.amount * e.per)
     end
   end
