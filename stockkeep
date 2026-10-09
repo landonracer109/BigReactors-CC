@@ -29,7 +29,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v30"   -- shown on screen; goes up by one with every release
+local VERSION = "v31"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -42,6 +42,7 @@ local CFG = {
   quiet         = 15,        -- ... and after that until nothing has arrived for this many seconds
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
+  dropWait      = 300,       -- seconds to wait after AE dropped a craft three times running
   rescan        = 600,       -- seconds between looking up item names in AE
   addChest      = "top",     -- side of this computer with the chest used to add items
 }
@@ -293,6 +294,7 @@ end
 -- Sends input for a smelt/pulverize item; returns a status text.
 local passedOn = {}   -- name -> how many of it this program has sent on to a machine, ever
 local sentTotal = {}  -- name -> how many smelt all / pulverize all has sent since the program started
+local vanished = {}   -- name -> AE jobs in a row that left the list with nothing made
 
 local function process(e, have, short, now)
   -- Several batches can be out at once, so a big furnace line is kept busy. The chest is the
@@ -430,12 +432,18 @@ local function step()
           if now >= c.retryAt then sent[e.name], c = nil, nil end
         elseif c and jobs then
           -- with a controller: AE's job list says it all
+          -- (AE1 lists every request the moment it's made, so gone from the list = finished, even
+          -- when the stock didn't rise because other crafts used it up as fast as it was made.)
           local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
-          if not left and (c.left or made > 0) then
-            sent[e.name], c = nil, nil   -- finished; asked again below if still short
-          elseif not left then
-            -- not in AE's list and none made: AE didn't take it on (no pattern?)
-            c.retryAt = now + CFG.backoff
+          if not left then
+            vanished[e.name] = (c.left or made > 0) and 0 or (vanished[e.name] or 0) + 1   -- c.left: AE had listed it
+            if vanished[e.name] >= 3 then
+              -- three jobs in a row gone with nothing to show: maybe AE drops it; wait a bit
+              vanished[e.name] = 0
+              c.retryAt, c.dropped = now + CFG.dropWait, true
+            else
+              sent[e.name], c = nil, nil   -- finished; asked again below if still short
+            end
           else
             if left < (c.left or math.huge) then c.left, c.since = left, now end
             c.waiting = now - c.since > CFG.stuckAfter   -- nothing made for a while: missing ingredients
@@ -454,7 +462,7 @@ local function step()
           end
         end
         if c and c.retryAt then
-          status[e.name] = "STUCK: no pattern or materials? retry in " .. math.ceil((c.retryAt - now) / 60) .. " min"
+          status[e.name] = (c.dropped and "AE dropped it 3 times (pattern?); again in " or "STUCK: no pattern or materials? retry in ") .. math.ceil((c.retryAt - now) / 60) .. " min"
         elseif c and c.waiting then
           -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
           status[e.name] = "AE waiting on ingredients (" .. commas(c.left) .. " left)"
@@ -472,6 +480,10 @@ local function step()
           local n = math.min(short, CFG.craftBatch)
           if pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then
             sent[e.name] = { amount = n, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
+            if jobs then   -- AE lists a job the moment it takes it on: look once, right away
+              local now2 = aeJobs()
+              sent[e.name].left = now2 and now2[i.id .. ":" .. i.dmg]
+            end
             status[e.name] = "crafting " .. commas(n)
             lastWork = "asked AE for " .. commas(n) .. " " .. displayName(e.name)
           else
