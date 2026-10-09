@@ -14,7 +14,8 @@
 -- Setup: a wired modem on an ME Interface (or another ME block) and on this computer, both
 -- turned red. Put a smelting and a pulverizing Ender Chest (same colours as your machines' input
 -- chests) touching that ME block, and set CFG.smeltChest / CFG.pulverizeChest to their side of it.
--- Optional: a wired modem on the ME Controller, so new crafts wait while AE is busy with yours.
+-- Optional: a wired modem on the ME Controller, so crafts follow AE's own job list (how many are
+-- left, finished, or waiting on ingredients) instead of guessing from the stock counts.
 -- Items are found by their name; one of each has to have been in AE once (it remembers them).
 --
 -- Editing: attach an Advanced Monitor to this computer. Tap - / + to change an amount, the method
@@ -28,7 +29,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v29"   -- shown on screen; goes up by one with every release
+local VERSION = "v30"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -273,10 +274,20 @@ local lowSince = {}   -- name -> os.clock() when it first went below target
 local status = {}     -- name -> text
 local lastWork = ""
 
-local function aeBusy()
-  if not controller then return false end
-  local jobs = try(controller, "getJobList")
-  return type(jobs) == "table" and next(jobs) ~= nil
+-- AE's crafting jobs, from the ME Controller: "id:dmg" -> how many are still to be made.
+-- (AE1 lists every request still running.) nil without a controller.
+local function aeJobs()
+  if not controller then return nil end
+  local list = try(controller, "getJobList")
+  if type(list) ~= "table" then return nil end
+  local jobs = {}
+  for _, j in pairs(list) do
+    if type(j) == "table" and j.id then
+      local key = j.id .. ":" .. (j.dmg or 0)
+      jobs[key] = (jobs[key] or 0) + (tonumber(j.qty) or 0)
+    end
+  end
+  return jobs
 end
 
 -- Sends input for a smelt/pulverize item; returns a status text.
@@ -384,7 +395,7 @@ local function byTier(a, b) if a.tier ~= b.tier then return a.tier < b.tier end 
 
 local function step()
   local now = os.clock()
-  local busy = aeBusy()
+  local jobs = aeJobs()   -- nil without a controller: crafts are then judged by the counts
   local craftTier = nil   -- crafts only for the lowest tier still short
   -- work through a sorted copy: the list on the screen holds still while it's being edited
   local order = {}
@@ -408,34 +419,57 @@ local function step()
         sent[e.name] = nil
       elseif e.how == "craft" then
         local c = sent[e.name]
-        -- a request still on its way: done once the stock rose by it; one that never arrives (no
-        -- pattern, missing materials) backs off and stops holding up the tiers above it. A big
-        -- craft that keeps delivering isn't stuck, however long it takes.
-        if c and not c.retryAt then
-          local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
-          if made > (c.made or 0) then c.made, c.since = made, now end
+        local i = ids[e.name]
+        local left = jobs and jobs[i.id .. ":" .. i.dmg]   -- AE's own count still to make
+        if jobs and left and not c then
+          -- a job for it already (asked for by hand, or before a restart): follow that one
+          c = { amount = left, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0, adopted = true }
+          sent[e.name] = c
         end
         if c and c.retryAt then
           if now >= c.retryAt then sent[e.name], c = nil, nil end
-        elseif c and (have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) >= c.startCount + c.amount) then
-          -- (counting what was sent straight on to a machine: assemblies going to the furnaces)
-          sent[e.name], c = nil, nil
-        elseif c and now - c.since > CFG.stuckAfter and not busy then
-          c.retryAt = now + CFG.backoff
+        elseif c and jobs then
+          -- with a controller: AE's job list says it all
+          local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
+          if not left and (c.left or made > 0) then
+            sent[e.name], c = nil, nil   -- finished; asked again below if still short
+          elseif not left then
+            -- not in AE's list and none made: AE didn't take it on (no pattern?)
+            c.retryAt = now + CFG.backoff
+          else
+            if left < (c.left or math.huge) then c.left, c.since = left, now end
+            c.waiting = now - c.since > CFG.stuckAfter   -- nothing made for a while: missing ingredients
+          end
+        elseif c then
+          -- without one: done once the stock rose by it, counting what was sent straight on to a
+          -- machine (assemblies going to the furnaces). A craft that keeps delivering isn't stuck,
+          -- however long it takes; one that never delivers (no pattern, missing materials) backs
+          -- off and stops holding up the tiers above it.
+          local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
+          if made > (c.made or 0) then c.made, c.since = made, now end
+          if made >= c.amount then
+            sent[e.name], c = nil, nil
+          elseif now - c.since > CFG.stuckAfter then
+            c.retryAt = now + CFG.backoff
+          end
         end
         if c and c.retryAt then
           status[e.name] = "STUCK: no pattern or materials? retry in " .. math.ceil((c.retryAt - now) / 60) .. " min"
+        elseif c and c.waiting then
+          -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
+          status[e.name] = "AE waiting on ingredients (" .. commas(c.left) .. " left)"
         elseif c then
           craftTier = craftTier or e.tier
-          status[e.name] = "crafting " .. commas(c.amount) .. ((c.made or 0) > 0 and (", " .. commas(c.made) .. " done") or "")
-        elseif busy then
-          status[e.name] = "waiting: AE busy"
+          if c.left then
+            status[e.name] = "crafting " .. commas(c.amount) .. ", " .. commas(c.left) .. " left"
+          else
+            status[e.name] = "crafting " .. commas(c.amount) .. ((c.made or 0) > 0 and (", " .. commas(c.made) .. " done") or "")
+          end
         elseif craftTier and e.tier > craftTier then
           status[e.name] = "waiting for tier " .. craftTier
         else
           craftTier = e.tier
           local n = math.min(short, CFG.craftBatch)
-          local i = ids[e.name]
           if pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then
             sent[e.name] = { amount = n, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
             status[e.name] = "crafting " .. commas(n)
