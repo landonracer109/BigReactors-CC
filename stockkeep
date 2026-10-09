@@ -14,6 +14,9 @@
 -- Setup: a wired modem on an ME Interface (or another ME block) and on this computer, both
 -- turned red. Put a smelting and a pulverizing Ender Chest (same colours as your machines' input
 -- chests) touching that ME block, and set CFG.smeltChest / CFG.pulverizeChest to their side of it.
+-- Optional: an extra ME Drive holding one empty storage cell, with a wired modem on it and an
+-- empty chest touching it: when an AE craft jams, stockkeep moves the cell out and back, which
+-- un-jams AE1 (it re-reads its storage and drops the stuck pushes).
 -- Optional: a wired modem on the ME Controller, so crafts follow AE's own job list (how many are
 -- left, finished, or waiting on ingredients) instead of guessing from the stock counts.
 -- Items are found by their name; one of each has to have been in AE once (it remembers them).
@@ -29,13 +32,14 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v38"   -- shown on screen; goes up by one with every release
+local VERSION = "v39"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
   smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
   pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
   craftBatch    = 256,       -- most of one item asked for in one crafting request
+  resetEvery    = 600,       -- seconds: at most this often, clear a stuck AE with the reset drive
   jobStall      = 300,       -- seconds an AE job may go without progress before it's flagged as stuck
   overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
   craftAhead    = 1024,      -- with a controller: keep asking (a chunk per check) while AE has fewer than this queued
@@ -151,8 +155,10 @@ end
 
 local ae, aeName, controller
 
+local resetDrive, resetDriveName   -- an ME Drive with a modem on it, for clearing AE's jammed crafts
+
 local function findAE()
-  ae, aeName, controller = nil, nil, nil
+  ae, aeName, controller, resetDrive, resetDriveName = nil, nil, nil, nil, nil
   for _, name in ipairs(peripheral.getNames()) do
     local methods = peripheral.getMethods(name) or {}
     local has = {}
@@ -161,7 +167,37 @@ local function findAE()
       ae, aeName = peripheral.wrap(name), name
     end
     if has.getJobList and not controller then controller = peripheral.wrap(name) end
+    local kind = (name .. " " .. (peripheral.getType(name) or "")):lower()
+    if kind:find("drive") and has.pushItemIntoSlot and has.pullItemIntoSlot and not has.requestCrafting and not resetDrive then
+      resetDrive, resetDriveName = peripheral.wrap(name), name
+    end
   end
+end
+
+-- Clears AE1's jammed crafts the way taking a cell out of a drive and back does: the drive
+-- refreshes on both moves, and that empties the queue of refused machine pushes. Uses an ME Drive
+-- with a modem on it, an empty storage cell in it, and an empty chest touching it (any side).
+-- Returns true when the cell went out and back.
+local resetSide = nil   -- which side of the drive the chest is on, once found
+local function resetAE()
+  if not resetDrive then return false, "no ME Drive with a modem" end
+  local ok, stacks = pcall(resetDrive.getAllStacks)
+  local slot
+  if ok and type(stacks) == "table" then
+    for k, v in pairs(stacks) do if type(v) == "table" and v.id and (tonumber(v.qty) or 0) > 0 then slot = tonumber(k); break end end
+    if slot and stacks[0] ~= nil then slot = slot + 1 end   -- some versions count from 0
+  end
+  if not slot then return false, "no cell in the reset drive" end
+  local sides = resetSide and { resetSide } or { "up", "down", "north", "south", "east", "west" }
+  for _, side in ipairs(sides) do
+    local okP, moved = pcall(resetDrive.pushItemIntoSlot, side, slot, 1, 1)
+    if okP and (tonumber(moved) or 0) > 0 then
+      pcall(resetDrive.pullItemIntoSlot, side, 1, 1, slot)
+      resetSide = side
+      return true
+    end
+  end
+  return false, "no empty chest next to the reset drive"
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -280,6 +316,7 @@ local lowSince = {}   -- name -> os.clock() when it first went below target
 local status = {}     -- name -> text
 local lastWork = ""
 local aeStuck = nil   -- name of an item whose AE job stopped moving (AE1 then crafts nothing else)
+local lastReset, resets = -math.huge, 0
 
 -- AE's crafting jobs, from the ME Controller: "id:dmg" -> how many are still to be made.
 -- (AE1 lists every request still running.) nil without a controller.
@@ -595,6 +632,17 @@ local function step()
     end
   end
   aeStuck = stuckNow and stuckNow.name
+  -- clear the jam ourselves when there's a reset drive (at most once per CFG.resetEvery)
+  if aeStuck and now - lastReset >= CFG.resetEvery then
+    lastReset = now
+    local ok, why = resetAE()
+    if ok then
+      resets = resets + 1
+      lastWork = "AE was stuck on " .. aeStuck .. ": reset it (" .. resets .. " so far)"
+    else
+      lastWork = "AE stuck on " .. aeStuck .. ", can't reset: " .. why
+    end
+  end
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -810,7 +858,7 @@ local function drawTerm()
   term.clear()
   term.setCursorPos(1, 1)
   term.setTextColour(colours.yellow)
-  term.write("stockkeep " .. VERSION .. "  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller)"))
+  term.write("stockkeep " .. VERSION .. "  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller)") .. (resetDrive and "  +reset drive" or ""))
   local low, ok = {}, 0
   for _, e in ipairs(LIST) do
     -- (same rule as a monitor in Needs mode)
@@ -820,7 +868,7 @@ local function drawTerm()
   term.setTextColour(colours.lightGrey)
   if aeStuck then
     term.setTextColour(colours.red)
-    term.write("AE STUCK on " .. aeStuck .. ": cancel it in the Crafting Monitor")
+    term.write("AE STUCK on " .. aeStuck .. (resetDrive and ": resetting AE" or ": cancel it in the Crafting Monitor"))
   else
     term.write(ok .. " of " .. #LIST .. " stocked. " .. lastWork)
   end
@@ -991,7 +1039,7 @@ local function drawMonitor(m, name, place)
   if aeStuck then   -- one stuck AE job stops all of AE's crafting: say so loudly
     band(m, 2, w, colours.red)
     m.setCursorPos(2, 2); m.setTextColour(colours.white)
-    m.write(("AE STUCK on " .. aeStuck .. ": shift-click it in the ME Crafting Monitor"):sub(1, w - 2))
+    m.write(("AE STUCK on " .. aeStuck .. (resetDrive and ": resetting AE with the reset drive" or ": shift-click it in the ME Crafting Monitor")):sub(1, w - 2))
     m.setBackgroundColour(colours.black)
   else
     m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w - 2))
