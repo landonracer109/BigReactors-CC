@@ -436,6 +436,26 @@ local AE_NAMES = {
   ["tile.netherores.ore.tennantite"] = "Nether Tennantite Ore",
   ["tile.netherores.ore.salt"] = "Nether Salt Ore",
   ["tile.netherores.ore.saltpeter"] = "Nether Saltpeter Ore",
+  -- Big Reactors (its en_US.properties)
+  ["tile.brOre.0"] = "Yellorite Ore",
+  ["tile.brMetal.0"] = "Yellorium Block",
+  ["tile.brMetal.1"] = "Cyanite Block",
+  ["tile.brMetal.2"] = "Graphite Block",
+  ["tile.brMetal.3"] = "Blutonium Block",
+  ["tile.multiblockGlass.0"] = "Reactor Glass",
+  ["tile.multiblockGlass.1"] = "Turbine Glass",
+  ["tile.blockReactorPart.0"] = "Reactor Casing",
+  ["tile.blockTurbinePart.0"] = "Turbine Housing",
+  ["tile.blockTurbineRotorPart.0"] = "Turbine Rotor Shaft",
+  ["tile.blockTurbineRotorPart.1"] = "Turbine Rotor Blade",
+  ["item.ingotYellorium"] = "Yellorium Ingot",
+  ["item.ingotCyanite"] = "Cyanite Ingot",
+  ["item.ingotGraphite"] = "Graphite Bar",
+  ["item.ingotBlutonium"] = "Blutonium Ingot",
+  ["item.dustYellorium"] = "Yellorium Dust",
+  ["item.dustCyanite"] = "Cyanite Dust",
+  ["item.dustBlutonium"] = "Blutonium Dust",
+  ["item.dustGraphite"] = "Graphite Dust",
   -- Applied Energistics
   ["AppEng.Items.0k"] = "ME Creative Cell",
   ["AppEng.Items.1k"] = "ME 1k Storage",
@@ -550,6 +570,7 @@ local function displayName(name)
     local words = {}
     for part in base:gmatch("[^%.]+") do words[#words + 1] = part end
     table.remove(words, 1)                                   -- "tile" / "item"
+    while #words > 1 and words[#words]:find("^%d+$") do table.remove(words) end   -- "brOre.0"
     if #words > 1 then table.remove(words, 1) end            -- the mod's name
     local s = table.concat(words, " "):gsub("(%l)(%u)", "%1 %2"):gsub("_", " ")
     return (s:gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b end))
