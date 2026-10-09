@@ -391,6 +391,117 @@ end
 ---------------------------------------------------------------------------------------------------
 -- the computer's own screen: what needs attention
 
+-- AE1 does not translate its item names on the server, so they arrive as internal keys
+-- ("AppEng.Blocks.OreQuartz"); these are its English names, from its own language file.
+local AE_NAMES = {
+  ["AppEng.Items.0k"] = "ME Creative Cell",
+  ["AppEng.Items.1k"] = "ME 1k Storage",
+  ["AppEng.Items.4k"] = "ME 4k Storage",
+  ["AppEng.Items.16k"] = "ME 16k Storage",
+  ["AppEng.Items.64k"] = "ME 64k Storage",
+  ["AppEng.Items.Spatial2Dim"] = "2³ Spatial Storage",
+  ["AppEng.Items.Spatial16Dim"] = "16³ Spatial Storage",
+  ["AppEng.Items.Spatial128Dim"] = "128³ Spatial Storage",
+  ["AppEng.Items.BlankPattern"] = "ME Blank Pattern",
+  ["AppEng.Items.EncPattern"] = "ME Encoded Pattern",
+  ["AppEng.Items.WirelessTerminal"] = "ME Wireless Access Terminal",
+  ["AppEng.Items.MemoryCard"] = "ME Bus Memory Card",
+  ["AppEng.Materials.AdvancedProcessorAssembly"] = "Advanced Processor Assembly",
+  ["AppEng.Materials.BasicProcessorAssembly"] = "Basic Processor Assembly",
+  ["AppEng.Materials.ConversionMatrix"] = "Conversion Matrix",
+  ["AppEng.Materials.Flour"] = "Flour",
+  ["AppEng.Materials.GoldDust"] = "Gold Dust",
+  ["AppEng.Materials.IronDust"] = "Iron Dust",
+  ["AppEng.Materials.MEAdvancedProcessor"] = "ME Advanced Processor",
+  ["AppEng.Materials.MEBasicProcessor"] = "ME Basic Processor",
+  ["AppEng.Materials.MEBlankPattern"] = "ME Blank Pattern",
+  ["AppEng.Materials.QuartzCrystal"] = "Certus Quartz",
+  ["AppEng.Materials.QuartzDustNether"] = "Nether Quartz Dust",
+  ["AppEng.Materials.QuartzDust"] = "Certus Quartz Dust",
+  ["AppEng.Materials.FluxQuartz"] = "Fluix Crystal",
+  ["AppEng.Materials.FluxPearl"] = "Fluix Pearl",
+  ["AppEng.Materials.PotentiaQuartz"] = "Potentia Crystal",
+  ["AppEng.Materials.FluxQuartzDust"] = "Fluix Dust",
+  ["AppEng.Materials.Silicon"] = "Silicon",
+  ["AppEng.Materials.StorageBlock"] = "Storage Block",
+  ["AppEng.Materials.StorageCell"] = "Storage Cell",
+  ["AppEng.Materials.StorageCellHousing"] = "Storage Cell Housing",
+  ["AppEng.Materials.StorageCluster"] = "Storage Cluster",
+  ["AppEng.Materials.StorageSegment"] = "Storage Segment",
+  ["AppEng.Materials.WirelessBooster"] = "Wireless Booster",
+  ["AppEng.Materials.WirelessReceiver"] = "Wireless Receiver",
+  ["AppEng.Materials.WoodenCrank"] = "Wooden Crank",
+  ["AppEng.Materials.WoodenGear"] = "Wooden Gear",
+  ["AppEng.Materials.IronNugget"] = "Iron Nugget",
+  ["AppEng.Materials.MatterBall"] = "Matter Ball",
+  ["AppEng.Materials.Singularity"] = "Singularity",
+  ["AppEng.Materials.EnderPearlDust"] = "Ender Pearl Dust",
+  ["AppEng.Materials.QuantumEntangledSingularity"] = "Quantum Entangled Singularity",
+  ["AppEng.Materials.SpatialStorageCell"] = "Spatial Storage Cell",
+  ["AppEng.Materials.SpatialStorageBlock"] = "Spatial Storage Block",
+  ["AppEng.Materials.SpatialStorageCluster"] = "Spatial Storage Cluster",
+  ["AppEng.Tools.QuartzAxe"] = "Quartz Axe",
+  ["AppEng.Tools.QuartzCuttingKnife"] = "Quartz Cutting Knife",
+  ["AppEng.Tools.QuartzHoe"] = "Quartz Hoe",
+  ["AppEng.Tools.QuartzPickAxe"] = "Quartz Pickaxe",
+  ["AppEng.Tools.QuartzShovel"] = "Quartz Shovel",
+  ["AppEng.Tools.QuartzSword"] = "Quartz Sword",
+  ["AppEng.Tools.QuartzWrench"] = "Quartz Wrench",
+  ["AppEng.Tools.VibrationCatalyst"] = "Vibration Catalyst",
+  ["AppEng.Tools.EntropyAccelerator"] = "Entropy Accelerator",
+  ["AppEng.Tools.MassCannon"] = "Matter Cannon",
+  ["AppEng.Blocks.SpatialPylon"] = "Spatial Pylon",
+  ["AppEng.Blocks.SpatialIOPort"] = "Spatial IO Port",
+  ["AppEng.Blocks.PhantomBlock"] = "Wooden Crank",
+  ["AppEng.Blocks.OreQuartz"] = "Certus Quartz Ore",
+  ["AppEng.Blocks.PatternProvider"] = "ME Pattern Provider",
+  ["AppEng.Blocks.AssemblerContainmentWall"] = "ME Assembler Containment Wall",
+  ["AppEng.Blocks.Chest"] = "ME Chest",
+  ["AppEng.Blocks.Cable"] = "ME Cable",
+  ["AppEng.Blocks.CoveredCable"] = "ME Covered Cable",
+  ["AppEng.Blocks.Controller"] = "ME Controller",
+  ["AppEng.Blocks.CraftingCPU"] = "ME Crafting CPU",
+  ["AppEng.Blocks.CraftingMonitor"] = "ME Crafting Monitor",
+  ["AppEng.Blocks.CraftingTerminal"] = "ME Crafting Terminal",
+  ["AppEng.Blocks.DarkCable"] = "ME Dark Cable",
+  ["AppEng.Blocks.Drive"] = "ME Drive",
+  ["AppEng.Blocks.HeatVent"] = "ME Heat Vent",
+  ["AppEng.Blocks.ImportBus"] = "ME Basic Import Bus",
+  ["AppEng.Blocks.ImportBusFuzzy"] = "ME Fuzzy Import Bus",
+  ["AppEng.Blocks.ImportBusPrecision"] = "ME Precision Import Bus",
+  ["AppEng.Blocks.Interface"] = "ME Interface",
+  ["AppEng.Blocks.IOPort"] = "ME IO Port",
+  ["AppEng.Blocks.LevelEmitter"] = "ME Level Emitter",
+  ["AppEng.Blocks.ExportBus"] = "ME Basic Export Bus",
+  ["AppEng.Blocks.ExportBusFuzzy"] = "ME Fuzzy Export Bus",
+  ["AppEng.Blocks.ExportBusPrecision"] = "ME Precision Export Bus",
+  ["AppEng.Blocks.P2PTunnel"] = "ME P2P Tunnel",
+  ["AppEng.Blocks.PatternEncoder"] = "ME Pattern Encoder",
+  ["AppEng.Blocks.Partitioner"] = "ME Partition Editor",
+  ["AppEng.Blocks.StorageBus"] = "ME Storage Bus",
+  ["AppEng.Blocks.StorageBusFuzzy"] = "ME Fuzzy Storage Bus",
+  ["AppEng.Blocks.StorageMonitor"] = "ME Storage Monitor",
+  ["AppEng.Blocks.Terminal"] = "ME Access Terminal",
+  ["AppEng.Blocks.WirelessAccessPoint"] = "ME Wireless Access Point",
+  ["AppEng.Blocks.GrindStone"] = "Grind Stone",
+  ["AppEng.Blocks.TransitionPlane"] = "ME Transition Plane",
+  ["AppEng.Blocks.Quartz"] = "Certus Quartz Block",
+  ["AppEng.Blocks.QuartzChiseled"] = "Certus Quartz Chiseled Block",
+  ["AppEng.Blocks.QuartzPillar"] = "Certus Quartz Pillar",
+  ["AppEng.Blocks.EnergyCell"] = "Energy Cell",
+  ["AppEng.Blocks.Condenser"] = "ME Condenser",
+  ["AppEng.Blocks.PowerRelay"] = "ME Power Relay",
+  ["AppEng.Blocks.QuantumLink"] = "Quantum Link Chamber",
+  ["AppEng.Blocks.QuantumRing"] = "Quantum Field Ring",
+  ["AppEng.Blocks.QuartzGlass"] = "Quartz Glass",
+  ["AppEng.Blocks.QuartzLamp"] = "Vibrant Quartz Glass",
+  ["AppEng.Blocks.TinyTNT"] = "Tiny TNT",
+}
+
+local function displayName(name)
+  return AE_NAMES[name] or AE_NAMES[(name:gsub("%.name$", ""))] or name
+end
+
 local function statusColour(st)
   if not st then return colours.white end
   if st:find("STUCK") or st:find("never") or st:find("failed") or st:find("can't") then return colours.red end
@@ -419,7 +530,8 @@ local function drawTerm()
     if y > h then break end
     local st = status[e.name] or ""
     term.setCursorPos(1, y); term.setTextColour(colours.white)
-    term.write(#e.name > 20 and (e.name:sub(1, 19) .. ".") or e.name)
+    local shown = displayName(e.name)
+    term.write(#shown > 20 and (shown:sub(1, 19) .. ".") or shown)
     term.setCursorPos(22, y); term.setTextColour(colours.lightBlue)
     term.write((e.have and commas(e.have) or "?") .. "/" .. commas(e.keep))
     term.setCursorPos(36, y); term.setTextColour(statusColour(st))
@@ -515,7 +627,8 @@ local function drawMonitor(m)
   for i = first, math.min(#LIST, first + rows - 1) do
     local e, y = LIST[i], 4 + i - first
     m.setCursorPos(2, y); m.setTextColour(colours.white)
-    m.write(#e.name > nameW and (e.name:sub(1, nameW - 1) .. ".") or e.name)
+    local shown = displayName(e.name)
+    m.write(#shown > nameW and (shown:sub(1, nameW - 1) .. ".") or shown)
     m.setCursorPos(cKeep, y); m.setTextColour(colours.lightBlue)
     m.write((e.have and commas(e.have) or "?") .. " / " .. commas(e.keep))
     button(m, cHow, y, (" " .. methodLabel(e) .. string.rep(" ", 14)):sub(1, 15), colours.blue, "how", e)
@@ -574,7 +687,7 @@ local function addFromChest()
   end
   LIST[#LIST + 1] = e
   saveIds(); saveList(); reindex()
-  ui.message = "Added " .. item.name .. (e.from and (" (from " .. e.from .. ")") or "") .. ". Set its amount with + and its method by tapping it."
+  ui.message = "Added " .. displayName(item.name) .. (e.from and (" (from " .. displayName(e.from) .. ")") or "") .. ". Set its amount with + and its method by tapping it."
 end
 
 local function touch(x, y)
