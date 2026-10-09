@@ -215,18 +215,32 @@ local displayName  -- the readable name of an item (defined with the screen code
 local function scanIds()
   local all = try(ae, "getAvailableItems")
   if type(all) ~= "table" then return end
-  local changed = false
+  -- Several items can share a name (Chisel's glass blocks are all "Glass"), so gather every
+  -- match for each listed name first.
+  local found = {}   -- listed name -> { AE stacks with that name }
   for _, s in pairs(all) do
     if type(s) == "table" and s.name then
       -- a row can name an item the way AE reports it ("AppEng.Materials.BasicProcessorAssembly")
       -- or by its readable name ("Basic Processor Assembly", as the starting list does)
       local key = wanted[s.name] and s.name or nil
       if not key then local shown = displayName(s.name); if shown ~= s.name and wanted[shown] then key = shown end end
-      local known = key and ids[key]
-      if key and (not known or known.id ~= s.id or known.dmg ~= s.dmg or known.max ~= s.maxSize) then
-        ids[key] = { id = s.id, dmg = s.dmg, max = s.maxSize }
-        changed = true
-      end
+      if key then found[key] = found[key] or {}; table.insert(found[key], s) end
+    end
+  end
+  local changed = false
+  for key, matches in pairs(found) do
+    local known = ids[key]
+    local pick = nil
+    if known and known.chosen then
+      -- added from the chest: that exact item, whatever else shares its name
+      for _, s in ipairs(matches) do if s.id == known.id and s.dmg == known.dmg then pick = s end end
+    else
+      -- otherwise the one there's most of (100k glass, not 65 chiseled glass)
+      for _, s in ipairs(matches) do if not pick or (tonumber(s.qty) or 0) > (tonumber(pick.qty) or 0) then pick = s end end
+    end
+    if pick and (not known or known.id ~= pick.id or known.dmg ~= pick.dmg or known.max ~= pick.maxSize) then
+      ids[key] = { id = pick.id, dmg = pick.dmg, max = pick.maxSize, chosen = known and known.chosen }
+      changed = true
     end
   end
   if changed then saveIds() end
@@ -828,11 +842,18 @@ local function addFromChest()
     ui.message = "Put the item in slot 1 of the chest (and its input in slot 2 to smelt or pulverize it)."
     return
   end
-  if byName[item.name] or byName[displayName(item.name)] then ui.message = displayName(item.name) .. " is already on the list."; return end
-  ids[item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize }
+  -- already listed: point that row at this exact item (to pick one of several with the same name)
+  local listed = byName[item.name] and item.name or (byName[displayName(item.name)] and displayName(item.name))
+  if listed then
+    ids[listed] = { id = item.id, dmg = item.dmg, max = item.maxSize, chosen = true }
+    saveIds()
+    ui.message = displayName(item.name) .. " is already on the list; it now means exactly this item (" .. item.id .. ":" .. item.dmg .. ")."
+    return
+  end
+  ids[item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize, chosen = true }
   local e = { name = item.name, keep = 256, tier = 5, how = "craft", per = 1 }
   if type(input) == "table" and input.name and input.name ~= "empty" then
-    ids[input.name] = { id = input.id, dmg = input.dmg, max = input.maxSize }
+    ids[input.name] = { id = input.id, dmg = input.dmg, max = input.maxSize, chosen = true }
     e.from, e.how, e.tier = input.name, "smelt", 2
   end
   LIST[#LIST + 1] = e
