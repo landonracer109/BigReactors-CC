@@ -118,11 +118,20 @@ local IDS_FILE = "stockkeep.ids"
 ---------------------------------------------------------------------------------------------------
 -- helpers
 
+
 local function commas(n)
   local s = tostring(math.floor(math.abs(n) + 0.5))
   local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
   if out:sub(1, 1) == "," then out = out:sub(2) end
   return (n < 0 and "-" or "") .. out
+end
+
+-- 12,500 -> "12.5k" above 9,999, so the HAVE / KEEP column stays narrow
+local function compact(n)
+  if math.abs(n) < 10000 then return commas(n) end
+  local k = math.floor(n / 100 + 0.5) / 10
+  if k >= 1000 then return math.floor(k / 100 + 0.5) / 10 .. "M" end
+  return k .. "k"
 end
 
 local function try(p, method, ...)
@@ -615,8 +624,8 @@ local function drawMonitor(m)
   button(m, 40, 1, " > ", colours.grey, "next")
   m.setBackgroundColour(colours.black)
   m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w - 2))
-  local nameW = math.max(10, w - 68)
-  local cKeep, cHow, cTier, cBtn, cSt = nameW + 2, nameW + 21, nameW + 37, nameW + 41, nameW + 55
+  local nameW = math.max(10, w - 63)
+  local cKeep, cHow, cTier, cBtn, cSt = nameW + 2, nameW + 16, nameW + 32, nameW + 36, nameW + 50
   -- column headings on a grey band
   band(m, 3, w, colours.grey)
   m.setTextColour(colours.white)
@@ -630,7 +639,7 @@ local function drawMonitor(m)
     local shown = displayName(e.name)
     m.write(#shown > nameW and (shown:sub(1, nameW - 1) .. ".") or shown)
     m.setCursorPos(cKeep, y); m.setTextColour(colours.lightBlue)
-    m.write((e.have and commas(e.have) or "?") .. " / " .. commas(e.keep))
+    m.write((e.have and compact(e.have) or "?") .. " / " .. compact(e.keep))
     button(m, cHow, y, (" " .. methodLabel(e) .. string.rep(" ", 14)):sub(1, 15), colours.blue, "how", e)
     button(m, cTier, y, " " .. e.tier .. " ", colours.purple, "tier", e)
     button(m, cBtn, y, " - ", colours.grey, "less", e)
