@@ -286,7 +286,24 @@ local function step()
     else
       local short = e.keep - have
       if short > 0 then lowSince[e.name] = lowSince[e.name] or now else lowSince[e.name] = nil end
-      if e.how == "redstone" then
+      if e.how == "smelt all" or e.how == "pulverize all" then
+        -- input-driven, like an export bus: everything above the reserve (keep) goes to the machine
+        local extra = have - e.keep
+        if extra <= 0 then
+          status[e.name] = "ok"
+        else
+          local dir = e.how == "smelt all" and CFG.smeltChest or CFG.pulverizeChest
+          local n = math.min(extra, CFG.sendBatch)
+          local moved = tonumber(try(ae, "extractItem", { id = ids[e.name].id, dmg = ids[e.name].dmg, qty = n }, dir)) or 0
+          if moved > 0 then
+            passedOn[e.name] = (passedOn[e.name] or 0) + moved
+            status[e.name] = "sent " .. commas(moved)
+            lastWork = "sent " .. commas(moved) .. " " .. e.name .. " to " .. e.how:sub(1, -5)
+          else
+            status[e.name] = "can't reach the " .. e.how:sub(1, -5) .. " chest (full?)"
+          end
+        end
+      elseif e.how == "redstone" then
         rs.setOutput(e.side, short > 0)
         status[e.name] = short > 0 and ("ON (" .. e.side .. ")") or "ok"
       elseif short <= 0 then
@@ -379,7 +396,7 @@ end
 -- the monitor: the whole list, edited by touch
 
 local LADDER = { 0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536 }
-local METHODS = { "craft", "smelt", "pulverize", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
+local METHODS = { "craft", "smelt", "pulverize", "smelt all", "pulverize all", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
 local ui = { page = 1, hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0 }
 
 local function methodLabel(e)
