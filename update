@@ -7,8 +7,8 @@
 --   update all        every controller that reports to the brlink relay updates itself to the
 --                     newest version within a few seconds (needs a brlink.key file here)
 --
--- brcontrol and stockkeep run "update <commit>" by themselves when the relay passes on an
--- "update all".
+-- Only brcontrol runs "update <commit>" by itself when the relay passes on an "update all";
+-- stockkeep and dashboard computers are updated by typing update (or update <commit>) on them.
 
 local REPO = "landonracer109/BigReactors-CC"
 local RELAY = "https://brlink.tailbdc4d5.ts.net"
