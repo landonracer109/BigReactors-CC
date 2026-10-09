@@ -332,12 +332,17 @@ local function flow()
   end
 end
 
+local function byTier(a, b) if a.tier ~= b.tier then return a.tier < b.tier end return a.name < b.name end
+
 local function step()
   local now = os.clock()
   local busy = aeBusy()
   local craftTier = nil   -- crafts only for the lowest tier still short
-  table.sort(LIST, function(a, b) if a.tier ~= b.tier then return a.tier < b.tier end return a.name < b.name end)
-  for _, e in ipairs(LIST) do
+  -- work through a sorted copy: the list on the screen holds still while it's being edited
+  local order = {}
+  for i, e in ipairs(LIST) do order[i] = e end
+  table.sort(order, byTier)
+  for _, e in ipairs(order) do
     local have = count(e.name)
     if have == nil then
       status[e.name] = "never seen: put one in AE"
@@ -621,7 +626,26 @@ end
 
 local LADDER = { 0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536 }
 local METHODS = { "craft", "smelt", "pulverize", "smelt all", "pulverize all", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
-local ui = { page = 1, hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0 }
+local ui = { page = 1, hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0,
+             editedAt = -math.huge }
+local SETTLE = 20   -- seconds after the last change before the list sorts itself again
+
+-- Sorts the screen's list by tier and name, unless something was changed in the last SETTLE
+-- seconds (so a row doesn't jump away while you're still setting it). True if the order changed.
+local function settleList()
+  if os.clock() - ui.editedAt < SETTLE then return false end
+  local before = {}
+  for i, e in ipairs(LIST) do before[i] = e end
+  table.sort(LIST, byTier)
+  local moved = false
+  for i, e in ipairs(LIST) do if before[i] ~= e then moved = true end end
+  -- follow the row last changed to its new page
+  if moved and ui.edited and ui.rows then
+    for i, e in ipairs(LIST) do if e == ui.edited then ui.page = math.ceil(i / ui.rows) end end
+  end
+  ui.edited = nil
+  return moved
+end
 
 local function methodLabel(e)
   if e.how == "redstone" then return "rs:" .. (e.side or "?") end
@@ -684,6 +708,7 @@ local function drawMonitor(m)
   if COMMIT then m.setCursorPos(w - #COMMIT, 1); m.setTextColour(colours.lightBlue); m.write(COMMIT) end
   button(m, 13, 1, " Add from chest ", colours.green, "add")
   local rows = h - 4
+  ui.rows = rows
   local pages = math.max(1, math.ceil(#LIST / rows))
   if ui.page > pages then ui.page = pages end
   button(m, 31, 1, " < ", colours.grey, "prev")
@@ -772,7 +797,11 @@ local function touch(x, y)
     if y == hit.y and x >= hit.x1 and x <= hit.x2 then
       local e = hit.e
       if hit.action ~= "remove" then ui.confirm = nil end
-      if hit.action == "add" then addFromChest()
+      if hit.action ~= "name" and hit.action ~= "prev" and hit.action ~= "next" then ui.editedAt, ui.edited = os.clock(), e end
+      if hit.action == "add" then
+        local n = #LIST
+        addFromChest()
+        if #LIST > n then ui.page, ui.edited = math.huge, LIST[#LIST] end   -- show the last page, where the new row is
       elseif hit.action == "name" then
         ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from)) or "")
       elseif hit.action == "prev" then ui.page = math.max(1, ui.page - 1)
@@ -860,6 +889,7 @@ while true do
       end
       if lastWork ~= before then redraw = true end
     end
+    if settleList() then redraw = true end
     if redraw then drawAll() end
     timer = os.startTimer(1)
   elseif event == "monitor_touch" then
