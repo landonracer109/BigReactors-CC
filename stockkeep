@@ -810,30 +810,42 @@ if not ae then
 end
 scanIds()
 
+-- One heartbeat timer, started again only after the work is done. CC 1.63 throws away any event
+-- that arrives while a peripheral call is waiting for its answer, so a second timer running
+-- alongside the AE calls can be lost, and its loop never comes back.
 local lastScan = os.clock()
+local lastStep, lastFlow = -math.huge, -math.huge
 local timer = os.startTimer(0)
-local flowTimer = os.startTimer(1)
 while true do
   local event, p1, p2, p3 = os.pullEventRaw()
   if event == "timer" and p1 == timer then
     if not ae then findAE() end
+    local redraw = not ae
     if ae then
-      if os.clock() - lastScan >= CFG.rescan then scanIds(); lastScan = os.clock() end
-      local ok, err = pcall(step)
-      if not ok then lastWork = "error: " .. tostring(err) end
-    end
-    drawAll()
-    timer = os.startTimer(CFG.check)
-  elseif event == "timer" and p1 == flowTimer then
-    if ae then
+      local now = os.clock()
       local before = lastWork
-      local ok, err = pcall(flow)
-      if not ok then lastWork = "error: " .. tostring(err) end
-      if lastWork ~= before then drawAll() end   -- only redraw when something was sent
+      if now - lastStep >= CFG.check then
+        redraw = true
+        if now - lastScan >= CFG.rescan then pcall(scanIds); lastScan = now end
+        local ok, err = pcall(step)
+        if not ok then lastWork = "error: " .. tostring(err) end
+        lastStep = os.clock()
+        lastFlow = -math.huge   -- send right after a check, so the counts are fresh
+      end
+      if os.clock() - lastFlow >= CFG.flowCheck then
+        local ok, err = pcall(flow)
+        if not ok then lastWork = "error: " .. tostring(err) end
+        lastFlow = os.clock()
+      end
+      if lastWork ~= before then redraw = true end
     end
-    flowTimer = os.startTimer(CFG.flowCheck)
+    if redraw then drawAll() end
+    timer = os.startTimer(1)
   elseif event == "monitor_touch" then
-    if touch(p2, p3) then drawAll() end
+    local ok, changed = pcall(touch, p2, p3)
+    if not ok then lastWork = "error: " .. tostring(changed) end
+    if not ok or changed then drawAll() end
+    timer = os.startTimer(1)   -- the old one may have fired during touch's AE calls
   elseif event == "peripheral" or event == "peripheral_detach" then
     findAE()
   elseif (event == "key" and p1 == keys.q) or event == "terminate" then
