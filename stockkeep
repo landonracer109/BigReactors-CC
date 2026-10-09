@@ -32,7 +32,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v39"   -- shown on screen; goes up by one with every release
+local VERSION = "v40"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -163,12 +163,15 @@ local function findAE()
     local methods = peripheral.getMethods(name) or {}
     local has = {}
     for _, m in ipairs(methods) do has[m] = true end
-    if has.requestCrafting and has.countOfItemType and has.extractItem and not ae then
+    -- (OpenPeripherals gives every AE block the network calls, an ME Drive too, so tell them
+    -- apart by kind: sends go to the chests at the interface, never at a drive)
+    local kind = (name .. " " .. (peripheral.getType(name) or "")):lower()
+    local isDrive = kind:find("drive") ~= nil
+    if has.requestCrafting and has.countOfItemType and has.extractItem and not isDrive and not ae then
       ae, aeName = peripheral.wrap(name), name
     end
     if has.getJobList and not controller then controller = peripheral.wrap(name) end
-    local kind = (name .. " " .. (peripheral.getType(name) or "")):lower()
-    if kind:find("drive") and has.pushItemIntoSlot and has.pullItemIntoSlot and not has.requestCrafting and not resetDrive then
+    if isDrive and has.pushItemIntoSlot and has.pullItemIntoSlot and not resetDrive then
       resetDrive, resetDriveName = peripheral.wrap(name), name
     end
   end
