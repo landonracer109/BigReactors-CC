@@ -765,7 +765,13 @@ local function touch(x, y)
         local nextIdx = 1
         for i, mth in ipairs(METHODS) do if mth == cur then nextIdx = i % #METHODS + 1 end end
         local mth = METHODS[nextIdx]
+        local wasAll = e.how == "smelt all" or e.how == "pulverize all"
         if mth:sub(1, 3) == "rs:" then e.how, e.side = "redstone", mth:sub(4) else e.how, e.side = mth, nil end
+        local isAll = e.how == "smelt all" or e.how == "pulverize all"
+        -- for smelt all / pulverize all the number is a reserve, almost always 0; the old amount
+        -- comes back when tapping on to a method with a target
+        if isAll and not wasAll then e.keepBefore, e.keep = e.keep, 0
+        elseif wasAll and not isAll and e.keepBefore then e.keep, e.keepBefore = e.keepBefore, nil end
         if (e.how == "smelt" or e.how == "pulverize") and not e.from then
           ui.message = e.how .. " makes " .. e.name .. " to a target and needs its input (chest slot 2). Keep tapping for " .. e.how .. " all."
         else
