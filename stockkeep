@@ -39,7 +39,8 @@ local CFG = {
   smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
   pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
   craftBatch    = 256,       -- most of one item asked for in one crafting request
-  sendBatch     = 256,       -- most of one input sent to a machine chest at once
+  sendBatch     = 1728,      -- most of one item sent per check (27 stacks: a whole Ender Chest)
+  flowCheck     = 5,         -- seconds between sends for smelt all / pulverize all
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
   rescan        = 600,       -- seconds between looking up item names in AE
@@ -207,8 +208,8 @@ local function scanIds()
   for _, s in pairs(all) do
     if type(s) == "table" and s.name and wanted[s.name] then
       local known = ids[s.name]
-      if not known or known.id ~= s.id or known.dmg ~= s.dmg then
-        ids[s.name] = { id = s.id, dmg = s.dmg }
+      if not known or known.id ~= s.id or known.dmg ~= s.dmg or known.max ~= s.maxSize then
+        ids[s.name] = { id = s.id, dmg = s.dmg, max = s.maxSize }
         changed = true
       end
     end
@@ -220,6 +221,21 @@ local function count(name)
   local i = ids[name]
   if not i then return nil end
   return tonumber(try(ae, "countOfItemType", i.id, i.dmg)) or 0
+end
+
+-- Moves n of an item from AE into the chest on side `dir` of the ME block, one stack per call.
+-- (OpenPeripherals puts a whole request into one empty slot, past the 64 a slot holds, and the
+-- chest throws the extra away; a stack at a time never overfills a slot.) Returns how many moved.
+local function sendTo(id, n, dir)
+  local per = math.max(1, math.min(tonumber(id.max) or 64, 64))
+  local moved = 0
+  while moved < n do
+    local ask = math.min(per, n - moved)
+    local got = tonumber(try(ae, "extractItem", { id = id.id, dmg = id.dmg, qty = ask }, dir)) or 0
+    moved = moved + math.max(0, got)
+    if got < ask then break end   -- the chest is full (or AE ran out)
+  end
+  return moved
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -238,6 +254,7 @@ end
 
 -- Sends input for a smelt/pulverize item; returns a status text.
 local passedOn = {}   -- name -> how many of it this program has sent on to a machine, ever
+local sentTotal = {}  -- name -> how many smelt all / pulverize all has sent since the program started
 
 local function process(e, have, short, now)
   local s = sent[e.name]
@@ -270,13 +287,40 @@ local function process(e, have, short, now)
   local n = math.min(need, available, CFG.sendBatch)
   if n <= 0 then return "short, no " .. e.from end
   local dir = e.how == "smelt" and CFG.smeltChest or CFG.pulverizeChest
-  local moved = try(ae, "extractItem", { id = fromId.id, dmg = fromId.dmg, qty = n }, dir)
+  local moved = sendTo(fromId, n, dir)
   moved = tonumber(moved) or 0
   if moved <= 0 then return "can't reach the " .. e.how .. " chest (" .. dir .. ")" end
   sent[e.name] = { amount = moved, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
   passedOn[e.from] = (passedOn[e.from] or 0) + moved
   lastWork = "sent " .. commas(moved) .. " " .. e.from .. " to " .. e.how
   return "sent " .. commas(moved) .. " " .. e.from
+end
+
+-- smelt all / pulverize all: input-driven, like an export bus. Everything above the reserve
+-- (keep) goes to the machine chest, a stack per call until the chest is full; run often.
+local function flow()
+  for _, e in ipairs(LIST) do
+    if (e.how == "smelt all" or e.how == "pulverize all") and ids[e.name] then
+      local have = count(e.name) or 0
+      local extra = have - e.keep
+      if extra <= 0 then
+        if not (status[e.name] or ""):find("^sent") then status[e.name] = "ok" end
+      else
+        local dir = e.how == "smelt all" and CFG.smeltChest or CFG.pulverizeChest
+        local moved = sendTo(ids[e.name], math.min(extra, CFG.sendBatch), dir)
+        if moved > 0 then
+          passedOn[e.name] = (passedOn[e.name] or 0) + moved
+          sentTotal[e.name] = (sentTotal[e.name] or 0) + moved
+          status[e.name] = "sent " .. commas(sentTotal[e.name]) .. " so far"
+          have = have - moved
+          lastWork = "sent " .. commas(moved) .. " " .. e.name .. " to " .. e.how:sub(1, -5)
+        else
+          status[e.name] = "waiting: " .. e.how:sub(1, -5) .. " chest full"
+        end
+      end
+      e.have = have
+    end
+  end
 end
 
 local function step()
@@ -293,23 +337,7 @@ local function step()
       local short = e.keep - have
       if short > 0 then lowSince[e.name] = lowSince[e.name] or now else lowSince[e.name] = nil end
       if e.how == "smelt all" or e.how == "pulverize all" then
-        -- input-driven, like an export bus: everything above the reserve (keep) goes to the machine
-        local extra = have - e.keep
-        if extra <= 0 then
-          status[e.name] = "ok"
-        else
-          local dir = e.how == "smelt all" and CFG.smeltChest or CFG.pulverizeChest
-          local n = math.min(extra, CFG.sendBatch)
-          local moved = tonumber(try(ae, "extractItem", { id = ids[e.name].id, dmg = ids[e.name].dmg, qty = n }, dir)) or 0
-          if moved > 0 then
-            passedOn[e.name] = (passedOn[e.name] or 0) + moved
-            status[e.name] = "sent " .. commas(moved)
-            have = have - moved   -- show what is left after sending
-            lastWork = "sent " .. commas(moved) .. " " .. e.name .. " to " .. e.how:sub(1, -5)
-          else
-            status[e.name] = "can't reach the " .. e.how:sub(1, -5) .. " chest (full?)"
-          end
-        end
+        have = e.have or have   -- flow() sends these every CFG.flowCheck seconds and keeps the count
       elseif e.how == "redstone" then
         rs.setOutput(e.side, short > 0)
         status[e.name] = short > 0 and ("ON (" .. e.side .. ")") or "ok"
@@ -380,7 +408,8 @@ local function drawTerm()
   term.write("stockkeep" .. (COMMIT and (" " .. COMMIT) or "") .. "  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller)"))
   local low, ok = {}, 0
   for _, e in ipairs(LIST) do
-    if status[e.name] == "ok" then ok = ok + 1 else low[#low + 1] = e end
+    local st = status[e.name] or ""
+    if st == "ok" or st:find("^sent") then ok = ok + 1 else low[#low + 1] = e end
   end
   term.setCursorPos(1, 2)
   term.setTextColour(colours.lightGrey)
@@ -537,10 +566,10 @@ local function addFromChest()
     return
   end
   if byName[item.name] then ui.message = item.name .. " is already on the list."; return end
-  ids[item.name] = { id = item.id, dmg = item.dmg }
+  ids[item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize }
   local e = { name = item.name, keep = 256, tier = 5, how = "craft", per = 1 }
   if type(input) == "table" and input.name and input.name ~= "empty" then
-    ids[input.name] = { id = input.id, dmg = input.dmg }
+    ids[input.name] = { id = input.id, dmg = input.dmg, max = input.maxSize }
     e.from, e.how, e.tier = input.name, "smelt", 2
   end
   LIST[#LIST + 1] = e
@@ -606,6 +635,7 @@ scanIds()
 
 local lastScan = os.clock()
 local timer = os.startTimer(0)
+local flowTimer = os.startTimer(1)
 while true do
   local event, p1, p2, p3 = os.pullEventRaw()
   if event == "timer" and p1 == timer then
@@ -617,6 +647,14 @@ while true do
     end
     drawAll()
     timer = os.startTimer(CFG.check)
+  elseif event == "timer" and p1 == flowTimer then
+    if ae then
+      local before = lastWork
+      local ok, err = pcall(flow)
+      if not ok then lastWork = "error: " .. tostring(err) end
+      if lastWork ~= before then drawAll() end   -- only redraw when something was sent
+    end
+    flowTimer = os.startTimer(CFG.flowCheck)
   elseif event == "monitor_touch" then
     if touch(p2, p3) then drawAll() end
   elseif event == "peripheral" or event == "peripheral_detach" then
