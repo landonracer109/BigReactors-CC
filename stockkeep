@@ -38,9 +38,10 @@ local CFG = {
   check         = 30,        -- seconds between checks
   smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
   pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
-  craftBatch    = 256,       -- most of one item asked for in one crafting request
-  sendBatch     = 1728,      -- most of one item sent per check (27 stacks: a whole Ender Chest)
+  craftBatch    = 1024,      -- most of one item asked for in one crafting request
+  sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
   flowCheck     = 5,         -- seconds between sends for smelt all / pulverize all
+  trip          = 60,        -- seconds: how long a sent batch counts as still at the machines
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
   rescan        = 600,       -- seconds between looking up item names in AE
@@ -286,55 +287,59 @@ local passedOn = {}   -- name -> how many of it this program has sent on to a ma
 local sentTotal = {}  -- name -> how many smelt all / pulverize all has sent since the program started
 
 local function process(e, have, short, now)
+  -- Several batches can be out at once, so a big furnace line is kept busy. The chest is the
+  -- limit (nothing goes in while it's full); on top of that, what was sent in the last CFG.trip
+  -- seconds and hasn't shown up yet counts as still at the machines, so the target isn't
+  -- overshot by much. Runs every CFG.flowCheck seconds.
   local s = sent[e.name]
-  if s then
-    -- wait for the last batch: done when the stock went up by what it was meant to make,
-    -- counting what was passed straight on to the next machine (dust on its way to the furnace)
-    local gained = have - s.startCount + (passedOn[e.name] or 0) - s.passedAtStart
-    if s.retryAt then
-      if now < s.retryAt then
-        return "STUCK: " .. commas(s.amount) .. " " .. displayName(e.from) .. " never came back; retry in " .. math.ceil((s.retryAt - now) / 60) .. " min"
-      end
-      sent[e.name] = nil
-    elseif gained >= s.amount * e.per or have >= e.keep then
-      sent[e.name] = nil
-    else
-      -- The total can't show the whole batch coming back when something else uses the item at the
-      -- same time (crafting assemblies pulls the dust being pulverized). So watch for arrivals:
-      -- any rise since the last check means the machines are delivering.
-      if have > (s.lastHave or s.startCount) then s.lastMove = now end
-      s.lastHave = have
-      local quiet = now - (s.lastMove or s.since)
-      if quiet > CFG.stuckAfter then
-        if not s.lastMove then
-          s.retryAt = now + CFG.backoff
-          return "STUCK: " .. commas(s.amount) .. " " .. displayName(e.from) .. ", none back in " .. math.floor(quiet / 60) .. " min"
-        end
-        sent[e.name] = nil   -- deliveries came and stopped: the rest went to other uses; carry on
-        return "batch done (some used meanwhile)"
-      end
-      return "processing " .. commas(s.amount * e.per)
+  if not s then s = { batches = {}, lastHave = have, unanswered = 0 }; sent[e.name] = s end
+  -- any rise means the machines are delivering (the total may never rise by a whole batch when
+  -- something else uses the item meanwhile, like crafting assemblies pulling the dust)
+  if have > s.lastHave then s.waitingSince, s.unanswered = nil, 0 end
+  s.lastHave = have
+  if s.retryAt then
+    if now < s.retryAt then
+      return "STUCK: " .. displayName(e.from) .. " never came back; retry in " .. math.ceil((s.retryAt - now) / 60) .. " min"
     end
+    s.retryAt, s.waitingSince, s.unanswered, s.batches = nil, nil, 0, {}
   end
+  if s.waitingSince and now - s.waitingSince > CFG.stuckAfter then
+    s.retryAt = now + CFG.backoff
+    return "STUCK: " .. commas(s.unanswered) .. " " .. displayName(e.from) .. ", none back in " .. math.floor((now - s.waitingSince) / 60) .. " min"
+  end
+  -- still at the machines: sent recently, less what has come back since
+  local recent = {}
+  for _, b in ipairs(s.batches) do if now - b.t < CFG.trip then recent[#recent + 1] = b end end
+  s.batches = recent
+  local inFlight = 0
+  if recent[1] then
+    local total = 0
+    for _, b in ipairs(recent) do total = total + b.n end
+    local arrived = (have - recent[1].have + (passedOn[e.name] or 0) - recent[1].passed) / e.per
+    inFlight = math.max(0, total - math.max(0, arrived))
+  end
+  local inFlightText = inFlight > 0 and ("processing " .. commas(math.ceil(inFlight * e.per))) or nil
   if not e.from then return "no input: use " .. e.how .. " all, or re-add it" end
   local fromId = ids[e.from]
   if not fromId then return "needs " .. displayName(e.from) .. " (never seen)" end
+  local need = math.ceil(short / e.per) - math.ceil(inFlight)
+  if need <= 0 then return inFlightText end
   -- a raw material on the list (how = "watch") is only spent down to its own target;
   -- intermediates (dust on its way to ingots) can be used up, their own rule refills them
   local available = count(e.from) or 0
   local fromEntry = byName[e.from]
   if fromEntry and fromEntry.how == "watch" then available = available - fromEntry.keep end
-  local need = math.ceil(short / e.per)
   local n = math.min(need, available, CFG.sendBatch)
-  if n <= 0 then return "short, no " .. displayName(e.from) end
+  if n <= 0 then return inFlightText or ("short, no " .. displayName(e.from)) end
   local dir = e.how == "smelt" and CFG.smeltChest or CFG.pulverizeChest
-  local moved = sendTo(fromId, n, dir)
-  moved = tonumber(moved) or 0
-  if moved <= 0 then return "can't reach the " .. e.how .. " chest (" .. dir .. ")" end
-  sent[e.name] = { amount = moved, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
+  local moved = tonumber(sendTo(fromId, n, dir)) or 0
+  if moved <= 0 then return inFlightText or ("waiting: " .. e.how .. " chest full") end
+  s.batches[#s.batches + 1] = { n = moved, t = now, have = have, passed = passedOn[e.name] or 0 }
+  s.waitingSince = s.waitingSince or now
+  s.unanswered = s.unanswered + moved
   passedOn[e.from] = (passedOn[e.from] or 0) + moved
   lastWork = "sent " .. commas(moved) .. " " .. displayName(e.from) .. " to " .. e.how
-  return "sent " .. commas(moved) .. " " .. displayName(e.from)
+  return "processing " .. commas(math.ceil((inFlight + moved) * e.per))
 end
 
 -- smelt all / pulverize all: input-driven, like an export bus. Everything above the reserve
@@ -360,6 +365,17 @@ local function flow()
         else
           status[e.name] = "waiting: " .. e.how:sub(1, -5) .. " chest full"
         end
+      end
+      e.have = have
+    elseif (e.how == "smelt" or e.how == "pulverize") and ids[e.name] then
+      -- made to a target: keep enough input at the machines to cover what's short
+      local have = count(e.name) or 0
+      if have >= e.keep then
+        sent[e.name] = nil
+        status[e.name] = "ok"
+      else
+        local ok, st = pcall(process, e, have, e.keep - have, os.clock())   -- one bad row mustn't stop the rest
+        status[e.name] = ok and st or ("error: " .. tostring(st))
       end
       e.have = have
     end
@@ -395,10 +411,16 @@ local function step()
       elseif e.how == "craft" then
         local c = sent[e.name]
         -- a request still on its way: done once the stock rose by it; one that never arrives (no
-        -- pattern, missing materials) backs off and stops holding up the tiers above it
+        -- pattern, missing materials) backs off and stops holding up the tiers above it. A big
+        -- craft that keeps delivering isn't stuck, however long it takes.
+        if c and not c.retryAt then
+          local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
+          if made > (c.made or 0) then c.made, c.since = made, now end
+        end
         if c and c.retryAt then
           if now >= c.retryAt then sent[e.name], c = nil, nil end
-        elseif c and (have >= c.startCount + c.amount) then
+        elseif c and (have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) >= c.startCount + c.amount) then
+          -- (counting what was sent straight on to a machine: assemblies going to the furnaces)
           sent[e.name], c = nil, nil
         elseif c and now - c.since > CFG.stuckAfter and not busy then
           c.retryAt = now + CFG.backoff
@@ -407,7 +429,7 @@ local function step()
           status[e.name] = "STUCK: no pattern or materials? retry in " .. math.ceil((c.retryAt - now) / 60) .. " min"
         elseif c then
           craftTier = craftTier or e.tier
-          status[e.name] = "crafting " .. commas(c.amount)
+          status[e.name] = "crafting " .. commas(c.amount) .. ((c.made or 0) > 0 and (", " .. commas(c.made) .. " done") or "")
         elseif busy then
           status[e.name] = "waiting: AE busy"
         elseif craftTier and e.tier > craftTier then
@@ -417,7 +439,7 @@ local function step()
           local n = math.min(short, CFG.craftBatch)
           local i = ids[e.name]
           if pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then
-            sent[e.name] = { amount = n, since = now, startCount = have }
+            sent[e.name] = { amount = n, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
             status[e.name] = "crafting " .. commas(n)
             lastWork = "asked AE for " .. commas(n) .. " " .. displayName(e.name)
           else
@@ -427,8 +449,7 @@ local function step()
           end
         end
       elseif e.how == "smelt" or e.how == "pulverize" then
-        local ok, st = pcall(process, e, have, short, now)   -- one bad row mustn't stop the rest
-        status[e.name] = ok and st or ("error: " .. tostring(st))
+        have = e.have or have   -- flow() sends these every CFG.flowCheck seconds and keeps the count
       else
         status[e.name] = "low"
       end
