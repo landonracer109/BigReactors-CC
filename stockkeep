@@ -29,7 +29,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v32"   -- shown on screen; goes up by one with every release
+local VERSION = "v33"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -42,6 +42,7 @@ local CFG = {
   quiet         = 15,        -- ... and after that until nothing has arrived for this many seconds
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
+  settle        = 20,        -- seconds after the last tap before the list re-sorts and an edited row starts sending
   dropWait      = 300,       -- seconds to wait after AE dropped a craft three times running
   rescan        = 600,       -- seconds between looking up item names in AE
   addChest      = "top",     -- side of this computer with the chest used to add items
@@ -326,7 +327,10 @@ local function process(e, have, short, now)
     local arrived = (have - s.base + (passedOn[e.name] or 0) - s.basePassed) / e.per
     inFlight = math.max(0, s.out - math.max(0, arrived))
     local delivering = s.lastRise and now - s.lastRise < CFG.quiet
-    if inFlight <= 0 or (now - s.lastSend >= CFG.trip and not delivering) then s.out, inFlight = 0, 0 end
+    -- forget it only once deliveries have started and then stopped: a long queue ahead of it
+    -- (ores first) can take minutes before anything arrives, and that is not "done"
+    local started = s.lastRise and s.lastRise >= s.windowStart
+    if inFlight <= 0 or (now - s.lastSend >= CFG.trip and started and not delivering) then s.out, inFlight = 0, 0 end
   end
   local inFlightText = inFlight > 0 and ("processing " .. commas(math.ceil(inFlight * e.per))) or nil
   if not e.from then return "no input: use " .. e.how .. " all, or re-add it" end
@@ -344,7 +348,7 @@ local function process(e, have, short, now)
   local dir = e.how == "smelt" and CFG.smeltChest or CFG.pulverizeChest
   local moved = tonumber(sendTo(fromId, n, dir)) or 0
   if moved <= 0 then return inFlightText or ("waiting: " .. e.how .. " chest full") end
-  if s.out == 0 then s.base, s.basePassed = have, passedOn[e.name] or 0 end
+  if s.out == 0 then s.base, s.basePassed, s.windowStart = have, passedOn[e.name] or 0, now end
   s.out, s.lastSend = s.out + moved, now
   s.waitingSince = s.waitingSince or now
   s.unanswered = s.unanswered + moved
@@ -359,7 +363,11 @@ local function flow()
   local rows = {}   -- a copy: the screen task can change the list while this waits on AE
   for i, e in ipairs(LIST) do rows[i] = e end
   for _, e in ipairs(rows) do
-    if (e.how == "smelt all" or e.how == "pulverize all") and ids[e.name] then
+    local editing = e.editedAt and os.clock() - e.editedAt < CFG.settle
+    if editing and (e.how == "smelt all" or e.how == "pulverize all" or e.how == "smelt" or e.how == "pulverize") then
+      -- just added or changed: nothing goes out until the taps are done
+      status[e.name] = "starts in " .. math.ceil(CFG.settle - (os.clock() - e.editedAt)) .. " s"
+    elseif (e.how == "smelt all" or e.how == "pulverize all") and ids[e.name] then
       local have = count(e.name) or 0
       local extra = have - e.keep
       if extra <= 0 then
@@ -419,6 +427,8 @@ local function step()
       elseif short <= 0 then
         status[e.name] = "ok"
         sent[e.name] = nil
+      elseif e.how == "craft" and e.editedAt and now - e.editedAt < CFG.settle then
+        status[e.name] = "starts in " .. math.ceil(CFG.settle - (now - e.editedAt)) .. " s"   -- still being set
       elseif e.how == "craft" then
         local c = sent[e.name]
         local i = ids[e.name]
@@ -728,7 +738,7 @@ local LADDER = { 0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32
 local METHODS = { "craft", "smelt", "pulverize", "smelt all", "pulverize all", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
 local ui = { hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0,
              editedAt = -math.huge }
-local SETTLE = 20   -- seconds after the last change before the list sorts itself again
+local SETTLE = CFG.settle
 
 -- The screen groups rows by method, A-Z by name inside each group. (The checks work through
 -- the list by tier; this order is only for finding things.)
@@ -918,30 +928,45 @@ local function addFromChest()
     ui.message = "Put the item in slot 1 of the chest (and its input in slot 2 to smelt or pulverize it)."
     return
   end
-  -- already listed: point that row at this exact item (to pick one of several with the same name)
+  local hasInput = type(input) == "table" and input.name and input.name ~= "empty"
+  -- how many one input makes, from the stack sizes: 4 Pulverized Obsidian in slot 1 and
+  -- 1 Obsidian in slot 2 = 4 each
+  local per = hasInput and math.max(1, math.floor((tonumber(item.qty) or 1) / math.max(1, tonumber(input.qty) or 1))) or 1
+  local perText = per > 1 and (", " .. per .. " from each") or ""
   local listed = byName[item.name] and item.name or (byName[displayName(item.name)] and displayName(item.name))
+  ids[listed or item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize, chosen = true }
+  if hasInput then ids[input.name] = { id = input.id, dmg = input.dmg, max = input.maxSize, chosen = true } end
   if listed then
-    ids[listed] = { id = item.id, dmg = item.dmg, max = item.maxSize, chosen = true }
-    saveIds()
-    ui.message = displayName(item.name) .. " is already on the list; it now means exactly this item (" .. item.id .. ":" .. item.dmg .. ")."
+    -- already listed: point that row at this exact item (to pick one of several with the same
+    -- name), and with an input in slot 2, make it from that
+    local e = byName[listed]
+    e.editedAt = os.clock()
+    if hasInput then
+      e.from, e.per = input.name, per
+      if e.how ~= "smelt" and e.how ~= "pulverize" then e.how = "smelt" end
+      sent[e.name] = nil
+      ui.message = displayName(listed) .. " now made from " .. displayName(input.name) .. perText .. " (" .. e.how .. "; tap to change)."
+    else
+      ui.message = displayName(item.name) .. " is already on the list; it now means exactly this item (" .. item.id .. ":" .. item.dmg .. ")."
+    end
+    saveIds(); saveList(); reindex()
     return
   end
-  ids[item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize, chosen = true }
-  local e = { name = item.name, keep = 256, tier = 5, how = "craft", per = 1 }
-  if type(input) == "table" and input.name and input.name ~= "empty" then
-    ids[input.name] = { id = input.id, dmg = input.dmg, max = input.maxSize, chosen = true }
-    e.from, e.how, e.tier = input.name, "smelt", 2
-  end
+  local e = { name = item.name, keep = 256, tier = 5, how = "craft", per = 1, editedAt = os.clock() }
+  if hasInput then e.from, e.how, e.tier, e.per = input.name, "smelt", 2, per end
   LIST[#LIST + 1] = e
   saveIds(); saveList(); reindex()
-  ui.message = "Added " .. displayName(item.name) .. (e.from and (" (from " .. displayName(e.from) .. ")") or "") .. ". Set its amount with + and its method by tapping it."
+  ui.message = "Added " .. displayName(item.name) .. (e.from and (" (from " .. displayName(e.from) .. perText .. ")") or "") .. ". Set its amount with + and its method by tapping it."
 end
 
 local function touch(mon, x, y)
   for _, hit in ipairs(ui.hits[mon] or {}) do
     if y == hit.y and x >= hit.x1 and x <= hit.x2 then
       local e = hit.e
-      if hit.action ~= "remove" then ui.confirm = nil end
+      if hit.action ~= "name" and hit.action ~= "prev" and hit.action ~= "next" then
+        ui.editedAt, ui.edited, ui.editedOn = os.clock(), e, mon
+        if e then e.editedAt = os.clock() end   -- this row waits until you're done with it
+      end
       if hit.action ~= "name" and hit.action ~= "prev" and hit.action ~= "next" then ui.editedAt, ui.edited, ui.editedOn = os.clock(), e, mon end
       if hit.action == "add" then
         local n = #LIST
@@ -951,7 +976,7 @@ local function touch(mon, x, y)
           ui.pages[mon] = math.ceil(#LIST / (ui.rows[mon] or 1)); savePages()
         end
       elseif hit.action == "name" then
-        ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from)) or "")
+        ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from) .. ((e.per or 1) > 1 and (", " .. e.per .. " each") or "")) or "")
       elseif hit.action == "prev" or hit.action == "next" then
         local pages = math.max(1, math.ceil(#LIST / (ui.rows[mon] or 1)))
         local page = math.max(1, math.min(ui.shown[mon] or 1, pages)) + (hit.action == "next" and 1 or -1)
