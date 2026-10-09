@@ -29,7 +29,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v35"   -- shown on screen; goes up by one with every release
+local VERSION = "v36"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -729,6 +729,13 @@ local function statusColour(st)
   return colours.white
 end
 
+-- A row counts as satisfied when it's at its target ("ok") or a smelt all / pulverize all row
+-- is just passing things on ("sent N so far"); everything else needs something.
+local function satisfied(e)
+  local st = status[e.name] or ""
+  return st == "ok" or st:find("^sent") ~= nil
+end
+
 local function drawTerm()
   local w, h = term.getSize()
   term.setBackgroundColour(colours.black)
@@ -738,8 +745,8 @@ local function drawTerm()
   term.write("stockkeep " .. VERSION .. "  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller)"))
   local low, ok = {}, 0
   for _, e in ipairs(LIST) do
-    local st = status[e.name] or ""
-    if st == "ok" or st:find("^sent") then ok = ok + 1 else low[#low + 1] = e end
+    -- (same rule as a monitor in Needs mode)
+    if satisfied(e) then ok = ok + 1 else low[#low + 1] = e end
   end
   term.setCursorPos(1, 2)
   term.setTextColour(colours.lightGrey)
@@ -797,6 +804,15 @@ end
 
 -- Sorts the screen's list by method and name, unless something was changed in the last SETTLE
 -- seconds (so a row doesn't jump away while you're still setting it). True if the order changed.
+-- What a monitor lists: everything, or ("Needs" mode, tapped in its header) only the rows that
+-- aren't satisfied, like the computer's own screen.
+local function monitorRows(mon)
+  if ui.pages["mode:" .. mon] ~= "needs" then return LIST end
+  local list = {}
+  for _, e in ipairs(LIST) do if not satisfied(e) then list[#list + 1] = e end end
+  return list
+end
+
 local function settleList()
   if os.clock() - ui.editedAt < SETTLE then return false end
   local before = {}
@@ -807,7 +823,7 @@ local function settleList()
   -- the monitor it was changed on follows the row to its new page
   local on = ui.editedOn
   if moved and ui.edited and on and ui.rows[on] then
-    for i, e in ipairs(LIST) do if e == ui.edited then ui.pages[on] = math.ceil(i / ui.rows[on]); savePages() end end
+    for i, e in ipairs(monitorRows(on)) do if e == ui.edited then ui.pages[on] = math.ceil(i / ui.rows[on]); savePages() end end
   end
   ui.edited, ui.editedOn = nil, nil
   return moved
@@ -876,12 +892,16 @@ local function drawMonitor(m, name, place)
   button(m, 13, 1, " Add from chest ", colours.green, "add")
   local rows = h - 4
   ui.rows[name] = rows
-  local pages = math.max(1, math.ceil(#LIST / rows))
-  local page = math.max(1, math.min(ui.pages[name] or place, pages))
+  local list = monitorRows(name)
+  local needsMode = ui.pages["mode:" .. name] == "needs"
+  local pages = math.max(1, math.ceil(#list / rows))
+  local page = math.max(1, math.min(ui.pages[name] or (needsMode and 1 or place), pages))
   ui.shown[name] = page
   button(m, 31, 1, " < ", colours.grey, "prev")
   m.setCursorPos(35, 1); m.setBackgroundColour(colours.blue); m.setTextColour(colours.white); m.write(page .. "/" .. pages)
   button(m, 40, 1, " > ", colours.grey, "next")
+  -- All / Needs: this monitor lists everything, or only what isn't satisfied
+  button(m, 45, 1, needsMode and " Needs " or " All ", needsMode and colours.orange or colours.grey, "mode")
   m.setBackgroundColour(colours.black)
   m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w - 2))
   local nameW = math.max(10, w - 63)
@@ -892,9 +912,12 @@ local function drawMonitor(m, name, place)
   m.setCursorPos(2, 3); m.write("ITEM"); m.setCursorPos(cKeep, 3); m.write("HAVE / KEEP"); m.setCursorPos(cHow, 3); m.write("HOW")
   m.setCursorPos(cTier, 3); m.write("T"); m.setCursorPos(cSt, 3); m.write("STATUS")
   m.setBackgroundColour(colours.black)
+  if needsMode and #list == 0 then
+    m.setCursorPos(2, 4); m.setTextColour(colours.lime); m.write("Everything is stocked.")
+  end
   local first = (page - 1) * rows + 1
-  for i = first, math.min(#LIST, first + rows - 1) do
-    local e, y = LIST[i], 4 + i - first
+  for i = first, math.min(#list, first + rows - 1) do
+    local e, y = list[i], 4 + i - first
     m.setCursorPos(2, y); m.setTextColour(colours.white)
     local shown = displayName(e.name)
     m.write(#shown > nameW and (shown:sub(1, nameW - 1) .. ".") or shown)
@@ -991,22 +1014,28 @@ local function touch(mon, x, y)
   for _, hit in ipairs(ui.hits[mon] or {}) do
     if y == hit.y and x >= hit.x1 and x <= hit.x2 then
       local e = hit.e
-      if hit.action ~= "name" and hit.action ~= "prev" and hit.action ~= "next" then
+      if hit.action ~= "remove" then ui.confirm = nil end
+      local browsing = hit.action == "name" or hit.action == "prev" or hit.action == "next" or hit.action == "mode"
+      if not browsing then
         ui.editedAt, ui.edited, ui.editedOn = os.clock(), e, mon
         if e then e.editedAt = os.clock() end   -- this row waits until you're done with it
       end
-      if hit.action ~= "name" and hit.action ~= "prev" and hit.action ~= "next" then ui.editedAt, ui.edited, ui.editedOn = os.clock(), e, mon end
       if hit.action == "add" then
         local n = #LIST
         addFromChest()
-        if #LIST > n then   -- show the last page, where the new row is
+        if #LIST > n then   -- show the page with the new row
           ui.edited = LIST[#LIST]
-          ui.pages[mon] = math.ceil(#LIST / (ui.rows[mon] or 1)); savePages()
+          local list = monitorRows(mon)
+          for i, r in ipairs(list) do if r == ui.edited then ui.pages[mon] = math.ceil(i / (ui.rows[mon] or 1)) end end
+          savePages()
         end
       elseif hit.action == "name" then
         ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from) .. ((e.per or 1) > 1 and (", " .. e.per .. " each") or "")) or "")
+      elseif hit.action == "mode" then
+        ui.pages["mode:" .. mon] = ui.pages["mode:" .. mon] ~= "needs" and "needs" or nil
+        ui.pages[mon] = 1; savePages()
       elseif hit.action == "prev" or hit.action == "next" then
-        local pages = math.max(1, math.ceil(#LIST / (ui.rows[mon] or 1)))
+        local pages = math.max(1, math.ceil(#monitorRows(mon) / (ui.rows[mon] or 1)))
         local page = math.max(1, math.min(ui.shown[mon] or 1, pages)) + (hit.action == "next" and 1 or -1)
         ui.pages[mon] = math.max(1, math.min(page, pages)); savePages()
       elseif hit.action == "less" then e.keep = stepKeep(e.keep, -1); saveList()
