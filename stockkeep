@@ -628,7 +628,7 @@ end
 
 local LADDER = { 0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536 }
 local METHODS = { "craft", "smelt", "pulverize", "smelt all", "pulverize all", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
-local ui = { page = 1, hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0,
+local ui = { hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0,
              editedAt = -math.huge }
 local SETTLE = 20   -- seconds after the last change before the list sorts itself again
 
@@ -643,7 +643,23 @@ local function byMethod(a, b)
   return a.name < b.name
 end
 
--- Sorts the screen's list by tier and name, unless something was changed in the last SETTLE
+-- Each monitor shows its own page (monitor name -> page), remembered in stockkeep.pages.
+-- A monitor without a saved page starts on its place in line: the first one page 1, and so on.
+local PAGES_FILE = "stockkeep.pages"
+ui.pages, ui.hits, ui.rows, ui.shown = {}, {}, {}, {}
+local function loadPages()
+  local h = fs.open(PAGES_FILE, "r")
+  if not h then return end
+  local t = textutils.unserialize(h.readAll() or "")
+  h.close()
+  if type(t) == "table" then ui.pages = t end
+end
+local function savePages()
+  local h = fs.open(PAGES_FILE, "w")
+  if h then h.write(textutils.serialize(ui.pages)); h.close() end
+end
+
+-- Sorts the screen's list by method and name, unless something was changed in the last SETTLE
 -- seconds (so a row doesn't jump away while you're still setting it). True if the order changed.
 local function settleList()
   if os.clock() - ui.editedAt < SETTLE then return false end
@@ -652,11 +668,12 @@ local function settleList()
   table.sort(LIST, byMethod)
   local moved = false
   for i, e in ipairs(LIST) do if before[i] ~= e then moved = true end end
-  -- follow the row last changed to its new page
-  if moved and ui.edited and ui.rows then
-    for i, e in ipairs(LIST) do if e == ui.edited then ui.page = math.ceil(i / ui.rows) end end
+  -- the monitor it was changed on follows the row to its new page
+  local on = ui.editedOn
+  if moved and ui.edited and on and ui.rows[on] then
+    for i, e in ipairs(LIST) do if e == ui.edited then ui.pages[on] = math.ceil(i / ui.rows[on]); savePages() end end
   end
-  ui.edited = nil
+  ui.edited, ui.editedOn = nil, nil
   return moved
 end
 
@@ -680,7 +697,7 @@ local function button(dev, x, y, label, bg, action, e)
   dev.setTextColour(colours.white)
   dev.write(label)
   dev.setBackgroundColour(colours.black)
-  ui.hits[#ui.hits + 1] = { x1 = x, x2 = x + #label - 1, y = y, action = action, e = e }
+  ui.drawing[#ui.drawing + 1] = { x1 = x, x2 = x + #label - 1, y = y, action = action, e = e }
 end
 
 local monitorScale = {}   -- monitor -> text size chosen for it
@@ -709,23 +726,25 @@ local function band(m, y, w, bg)
   m.write(string.rep(" ", w))
 end
 
-local function drawMonitor(m)
+local function drawMonitor(m, name, place)
   fitScale(m)
   local w, h = m.getSize()
   m.setBackgroundColour(colours.black)
   m.clear()
-  ui.hits = {}
+  ui.drawing = {}
+  ui.hits[name] = ui.drawing   -- this monitor's buttons, for its taps
   -- header: a solid bar with the title and the controls
   band(m, 1, w, colours.blue)
   m.setCursorPos(2, 1); m.setTextColour(colours.yellow); m.write("STOCKKEEP")
   if COMMIT then m.setCursorPos(w - #COMMIT, 1); m.setTextColour(colours.lightBlue); m.write(COMMIT) end
   button(m, 13, 1, " Add from chest ", colours.green, "add")
   local rows = h - 4
-  ui.rows = rows
+  ui.rows[name] = rows
   local pages = math.max(1, math.ceil(#LIST / rows))
-  if ui.page > pages then ui.page = pages end
+  local page = math.max(1, math.min(ui.pages[name] or place, pages))
+  ui.shown[name] = page
   button(m, 31, 1, " < ", colours.grey, "prev")
-  m.setCursorPos(35, 1); m.setBackgroundColour(colours.blue); m.setTextColour(colours.white); m.write(ui.page .. "/" .. pages)
+  m.setCursorPos(35, 1); m.setBackgroundColour(colours.blue); m.setTextColour(colours.white); m.write(page .. "/" .. pages)
   button(m, 40, 1, " > ", colours.grey, "next")
   m.setBackgroundColour(colours.black)
   m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w - 2))
@@ -737,13 +756,13 @@ local function drawMonitor(m)
   m.setCursorPos(2, 3); m.write("ITEM"); m.setCursorPos(cKeep, 3); m.write("HAVE / KEEP"); m.setCursorPos(cHow, 3); m.write("HOW")
   m.setCursorPos(cTier, 3); m.write("T"); m.setCursorPos(cSt, 3); m.write("STATUS")
   m.setBackgroundColour(colours.black)
-  local first = (ui.page - 1) * rows + 1
+  local first = (page - 1) * rows + 1
   for i = first, math.min(#LIST, first + rows - 1) do
     local e, y = LIST[i], 4 + i - first
     m.setCursorPos(2, y); m.setTextColour(colours.white)
     local shown = displayName(e.name)
     m.write(#shown > nameW and (shown:sub(1, nameW - 1) .. ".") or shown)
-    ui.hits[#ui.hits + 1] = { x1 = 2, x2 = nameW + 1, y = y, action = "name", e = e }
+    ui.drawing[#ui.drawing + 1] = { x1 = 2, x2 = nameW + 1, y = y, action = "name", e = e }
     m.setCursorPos(cKeep, y); m.setTextColour(colours.lightBlue)
     m.write((e.have and compact(e.have) or "?") .. " / " .. compact(e.keep))
     button(m, cHow, y, (" " .. methodLabel(e) .. string.rep(" ", 14)):sub(1, 15), colours.blue, "how", e)
@@ -756,19 +775,27 @@ local function drawMonitor(m)
   end
 end
 
+-- Advanced monitors in line order: ones touching the computer first, then by modem number
+-- (monitor_0, monitor_1, ... in the order their modems were first switched on).
 local function monitors()
   local list = {}
   for _, name in ipairs(peripheral.getNames()) do
-    if peripheral.getType(name) == "monitor" then list[#list + 1] = peripheral.wrap(name) end
+    if peripheral.getType(name) == "monitor" then
+      local m = peripheral.wrap(name)
+      if m and m.isColour and m.isColour() then list[#list + 1] = { name = name, m = m } end
+    end
   end
+  local function rank(n) return tonumber(n:match("_(%d+)$")) or -1 end
+  table.sort(list, function(a, b)
+    if rank(a.name) ~= rank(b.name) then return rank(a.name) < rank(b.name) end
+    return a.name < b.name
+  end)
   return list
 end
 
 local function drawAll()
   pcall(drawTerm)
-  for _, m in ipairs(monitors()) do
-    if m.isColour and m.isColour() then pcall(drawMonitor, m) end
-  end
+  for place, mon in ipairs(monitors()) do pcall(drawMonitor, mon.m, mon.name, place) end
 end
 
 -- The chest for adding items: on CFG.addChest (default on top of this computer).
@@ -805,20 +832,25 @@ local function addFromChest()
   ui.message = "Added " .. displayName(item.name) .. (e.from and (" (from " .. displayName(e.from) .. ")") or "") .. ". Set its amount with + and its method by tapping it."
 end
 
-local function touch(x, y)
-  for _, hit in ipairs(ui.hits) do
+local function touch(mon, x, y)
+  for _, hit in ipairs(ui.hits[mon] or {}) do
     if y == hit.y and x >= hit.x1 and x <= hit.x2 then
       local e = hit.e
       if hit.action ~= "remove" then ui.confirm = nil end
-      if hit.action ~= "name" and hit.action ~= "prev" and hit.action ~= "next" then ui.editedAt, ui.edited = os.clock(), e end
+      if hit.action ~= "name" and hit.action ~= "prev" and hit.action ~= "next" then ui.editedAt, ui.edited, ui.editedOn = os.clock(), e, mon end
       if hit.action == "add" then
         local n = #LIST
         addFromChest()
-        if #LIST > n then ui.page, ui.edited = math.huge, LIST[#LIST] end   -- show the last page, where the new row is
+        if #LIST > n then   -- show the last page, where the new row is
+          ui.edited = LIST[#LIST]
+          ui.pages[mon] = math.ceil(#LIST / (ui.rows[mon] or 1)); savePages()
+        end
       elseif hit.action == "name" then
         ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from)) or "")
-      elseif hit.action == "prev" then ui.page = math.max(1, ui.page - 1)
-      elseif hit.action == "next" then ui.page = ui.page + 1
+      elseif hit.action == "prev" or hit.action == "next" then
+        local pages = math.max(1, math.ceil(#LIST / (ui.rows[mon] or 1)))
+        local page = math.max(1, math.min(ui.shown[mon] or 1, pages)) + (hit.action == "next" and 1 or -1)
+        ui.pages[mon] = math.max(1, math.min(page, pages)); savePages()
       elseif hit.action == "less" then e.keep = stepKeep(e.keep, -1); saveList()
       elseif hit.action == "more" then e.keep = stepKeep(e.keep, 1); saveList()
       elseif hit.action == "tier" then e.tier = e.tier % 9 + 1; saveList()
@@ -864,6 +896,7 @@ end
 
 loadIds()
 loadList()
+loadPages()
 reindex()
 findAE()
 if not ae then
@@ -906,7 +939,7 @@ while true do
     if redraw then drawAll() end
     timer = os.startTimer(1)
   elseif event == "monitor_touch" then
-    local ok, changed = pcall(touch, p2, p3)
+    local ok, changed = pcall(touch, p1, p2, p3)
     if not ok then lastWork = "error: " .. tostring(changed) end
     if not ok or changed then drawAll() end
     timer = os.startTimer(1)   -- the old one may have fired during touch's AE calls
