@@ -1,0 +1,381 @@
+-- stockkeep: keeps your AE stock of important items topped up. ComputerCraft 1.63 +
+-- OpenPeripherals (Applied Energistics rv14).
+--
+-- Each item on the list below has a target amount and a way to make it:
+--   craft      ask AE to craft it (needs a pattern)
+--   smelt      send its input to your smelting Ender Chest
+--   pulverize  send its input to your pulverizing Ender Chest
+--   redstone   turn a redstone output on while it's low (replaces a level emitter, e.g. for
+--              Induction Smelters fed by export buses)
+--   watch      just show it (and how long it's been low)
+-- It works up the tiers: lower tiers are refilled first, so the things above them find their
+-- parts in stock and craft at full speed instead of one at a time.
+--
+-- Setup: a wired modem on an ME Interface (or another ME block) and on this computer, both
+-- turned red. Put a smelting and a pulverizing Ender Chest (same colours as your machines' input
+-- chests) touching that ME block, and set CFG.smeltChest / CFG.pulverizeChest to their side of it.
+-- Optional: a wired modem on the ME Controller, so new crafts wait while AE is busy with yours.
+-- Items are found by their name; one of each has to have been in AE once (it remembers them).
+
+local CFG = {
+  check         = 30,        -- seconds between checks
+  smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
+  pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
+  craftBatch    = 256,       -- most of one item asked for in one crafting request
+  sendBatch     = 256,       -- most of one input sent to a machine chest at once
+  stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
+  backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
+  rescan        = 600,       -- seconds between looking up item names in AE
+}
+
+-- name = exactly as shown in game; keep = target; tier = refill order (low first)
+local LIST = {
+  -- Applied Energistics
+  { name = "Certus Quartz Dust", keep = 2048, tier = 1, how = "pulverize", from = "Certus Quartz", per = 1 },
+  { name = "Silicon", keep = 4096, tier = 2, how = "smelt", from = "Certus Quartz Dust", per = 1 },
+  { name = "Fluix Crystal", keep = 2048, tier = 1, how = "watch" },
+  { name = "Certus Quartz", keep = 2048, tier = 1, how = "watch" },
+  { name = "Quartz Glass", keep = 1024, tier = 2, how = "craft" },
+  { name = "Basic Processor Assembly", keep = 512, tier = 3, how = "craft" },
+  { name = "Advanced Processor Assembly", keep = 256, tier = 3, how = "craft" },
+  { name = "ME Basic Processor", keep = 2048, tier = 4, how = "smelt", from = "Basic Processor Assembly", per = 1 },
+  { name = "ME Advanced Processor", keep = 1024, tier = 4, how = "smelt", from = "Advanced Processor Assembly", per = 1 },
+  { name = "Storage Cell", keep = 256, tier = 5, how = "craft" },
+  { name = "Storage Cell Housing", keep = 128, tier = 5, how = "craft" },
+  { name = "ME Cable", keep = 1024, tier = 5, how = "craft" },
+  { name = "ME Blank Pattern", keep = 256, tier = 5, how = "craft" },
+  { name = "Storage Segment", keep = 128, tier = 6, how = "craft" },
+  { name = "Storage Block", keep = 64, tier = 7, how = "craft" },
+  { name = "Storage Cluster", keep = 32, tier = 8, how = "craft" },
+  -- Thermal Expansion: ores to dust to ingots
+  { name = "Pulverized Copper", keep = 512, tier = 1, how = "pulverize", from = "Copper Ore", per = 2 },
+  { name = "Pulverized Tin", keep = 512, tier = 1, how = "pulverize", from = "Tin Ore", per = 2 },
+  { name = "Pulverized Silver", keep = 512, tier = 1, how = "pulverize", from = "Silver Ore", per = 2 },
+  { name = "Pulverized Lead", keep = 512, tier = 1, how = "pulverize", from = "Lead Ore", per = 2 },
+  { name = "Pulverized Iron", keep = 512, tier = 1, how = "pulverize", from = "Iron Ore", per = 2 },
+  { name = "Pulverized Gold", keep = 512, tier = 1, how = "pulverize", from = "Gold Ore", per = 2 },
+  { name = "Pulverized Coal", keep = 512, tier = 1, how = "pulverize", from = "Coal", per = 1 },
+  { name = "Pulverized Obsidian", keep = 512, tier = 1, how = "pulverize", from = "Obsidian", per = 1 },
+  { name = "Copper Ingot", keep = 4096, tier = 2, how = "smelt", from = "Pulverized Copper", per = 1 },
+  { name = "Tin Ingot", keep = 4096, tier = 2, how = "smelt", from = "Pulverized Tin", per = 1 },
+  { name = "Silver Ingot", keep = 4096, tier = 2, how = "smelt", from = "Pulverized Silver", per = 1 },
+  { name = "Lead Ingot", keep = 4096, tier = 2, how = "smelt", from = "Pulverized Lead", per = 1 },
+  { name = "Iron Ingot", keep = 4096, tier = 2, how = "smelt", from = "Pulverized Iron", per = 1 },
+  { name = "Gold Ingot", keep = 2048, tier = 2, how = "smelt", from = "Pulverized Gold", per = 1 },
+  -- Thermal Expansion: Induction Smelter alloys (redstone on while low, like a level emitter)
+  { name = "Invar Ingot", keep = 2048, tier = 3, how = "redstone", side = "left" },
+  { name = "Electrum Ingot", keep = 2048, tier = 3, how = "redstone", side = "right" },
+  { name = "Hardened Glass", keep = 1024, tier = 3, how = "redstone", side = "front" },
+  { name = "Enderium Ingot", keep = 1024, tier = 3, how = "watch" },
+  -- Thermal Expansion: parts
+  { name = "Pyrotheum Dust", keep = 1024, tier = 2, how = "craft" },
+  { name = "Cryotheum Dust", keep = 2048, tier = 2, how = "craft" },
+  { name = "Redstone Reception Coil", keep = 256, tier = 4, how = "craft" },
+  { name = "Redstone Transmission Coil", keep = 256, tier = 4, how = "craft" },
+  { name = "Redstone Conductance Coil", keep = 256, tier = 4, how = "craft" },
+  { name = "Pneumatic Servo", keep = 256, tier = 4, how = "craft" },
+  { name = "Machine Frame", keep = 256, tier = 5, how = "craft" },
+  { name = "Impulse Itemduct (Opaque)", keep = 2048, tier = 5, how = "craft" },
+  { name = "Redstone Energy Conduit", keep = 2048, tier = 5, how = "craft" },
+  { name = "Redstone Furnace", keep = 704, tier = 6, how = "craft" },
+  -- Big Reactors
+  { name = "Yellorium Ingot", keep = 10000, tier = 1, how = "watch" },
+  { name = "Graphite Bar", keep = 2048, tier = 2, how = "smelt", from = "Coal", per = 1 },
+  { name = "Turbine Housing", keep = 512, tier = 5, how = "craft" },
+  { name = "Turbine Glass", keep = 512, tier = 5, how = "craft" },
+  { name = "Rotor Blade", keep = 512, tier = 5, how = "craft" },
+  { name = "Rotor Shaft", keep = 128, tier = 5, how = "craft" },
+  { name = "Reactor Casing", keep = 256, tier = 5, how = "craft" },
+  -- ComputerCraft
+  { name = "Advanced Monitor", keep = 256, tier = 5, how = "craft" },
+  { name = "Wired Modem", keep = 64, tier = 5, how = "craft" },
+  { name = "Networking Cable", keep = 256, tier = 5, how = "craft" },
+  { name = "Computer", keep = 32, tier = 5, how = "craft" },
+}
+
+local IDS_FILE = "stockkeep.ids"
+
+---------------------------------------------------------------------------------------------------
+-- helpers
+
+local function commas(n)
+  local s = tostring(math.floor(math.abs(n) + 0.5))
+  local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  if out:sub(1, 1) == "," then out = out:sub(2) end
+  return (n < 0 and "-" or "") .. out
+end
+
+local function try(p, method, ...)
+  if not p or not p[method] then return nil end
+  local ok, v = pcall(p[method], ...)
+  if ok then return v end
+  return nil
+end
+
+---------------------------------------------------------------------------------------------------
+-- finding AE
+
+local ae, aeName, controller
+
+local function findAE()
+  ae, aeName, controller = nil, nil, nil
+  for _, name in ipairs(peripheral.getNames()) do
+    local methods = peripheral.getMethods(name) or {}
+    local has = {}
+    for _, m in ipairs(methods) do has[m] = true end
+    if has.requestCrafting and has.countOfItemType and has.extractItem and not ae then
+      ae, aeName = peripheral.wrap(name), name
+    end
+    if has.getJobList and not controller then controller = peripheral.wrap(name) end
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- item ids, learned by name from what's in AE (and remembered)
+
+local ids = {}   -- name -> { id, dmg }
+
+local function loadIds()
+  local h = fs.open(IDS_FILE, "r")
+  if not h then return end
+  local t = textutils.unserialize(h.readAll() or "")
+  h.close()
+  if type(t) == "table" then ids = t end
+end
+
+local function saveIds()
+  local h = fs.open(IDS_FILE, "w")
+  if h then h.write(textutils.serialize(ids)); h.close() end
+end
+
+local wanted, byName = {}, {}
+for _, e in ipairs(LIST) do
+  wanted[e.name] = true
+  byName[e.name] = e
+  if e.from then wanted[e.from] = true end
+end
+
+local function scanIds()
+  local all = try(ae, "getAvailableItems")
+  if type(all) ~= "table" then return end
+  local changed = false
+  for _, s in pairs(all) do
+    if type(s) == "table" and s.name and wanted[s.name] then
+      local known = ids[s.name]
+      if not known or known.id ~= s.id or known.dmg ~= s.dmg then
+        ids[s.name] = { id = s.id, dmg = s.dmg }
+        changed = true
+      end
+    end
+  end
+  if changed then saveIds() end
+end
+
+local function count(name)
+  local i = ids[name]
+  if not i then return nil end
+  return tonumber(try(ae, "countOfItemType", i.id, i.dmg)) or 0
+end
+
+---------------------------------------------------------------------------------------------------
+-- the work
+
+local sent = {}       -- name -> { amount, since, startCount } for smelt/pulverize batches
+local lowSince = {}   -- name -> os.clock() when it first went below target
+local status = {}     -- name -> text
+local lastWork = ""
+
+local function aeBusy()
+  if not controller then return false end
+  local jobs = try(controller, "getJobList")
+  return type(jobs) == "table" and next(jobs) ~= nil
+end
+
+-- Sends input for a smelt/pulverize item; returns a status text.
+local passedOn = {}   -- name -> how many of it this program has sent on to a machine, ever
+
+local function process(e, have, short, now)
+  local s = sent[e.name]
+  if s then
+    -- wait for the last batch: done when the stock went up by what it was meant to make,
+    -- counting what was passed straight on to the next machine (dust on its way to the furnace)
+    local gained = have - s.startCount + (passedOn[e.name] or 0) - s.passedAtStart
+    if s.retryAt then
+      if now < s.retryAt then
+        return "STUCK: " .. commas(s.amount) .. " " .. e.from .. " never came back; retry in " .. math.ceil((s.retryAt - now) / 60) .. " min"
+      end
+      sent[e.name] = nil
+    elseif gained >= s.amount * e.per or have >= e.keep then
+      sent[e.name] = nil
+    elseif now - s.since > CFG.stuckAfter then
+      s.retryAt = now + CFG.backoff
+      return "STUCK: " .. commas(s.amount) .. " " .. e.from .. " sent " .. math.floor((now - s.since) / 60) .. " min ago"
+    else
+      return "processing " .. commas(s.amount * e.per)
+    end
+  end
+  local fromId = ids[e.from]
+  if not fromId then return "needs " .. e.from .. " (never seen)" end
+  -- a raw material on the list (how = "watch") is only spent down to its own target;
+  -- intermediates (dust on its way to ingots) can be used up, their own rule refills them
+  local available = count(e.from) or 0
+  local fromEntry = byName[e.from]
+  if fromEntry and fromEntry.how == "watch" then available = available - fromEntry.keep end
+  local need = math.ceil(short / e.per)
+  local n = math.min(need, available, CFG.sendBatch)
+  if n <= 0 then return "short, no " .. e.from end
+  local dir = e.how == "smelt" and CFG.smeltChest or CFG.pulverizeChest
+  local moved = try(ae, "extractItem", { id = fromId.id, dmg = fromId.dmg, qty = n }, dir)
+  moved = tonumber(moved) or 0
+  if moved <= 0 then return "can't reach the " .. e.how .. " chest (" .. dir .. ")" end
+  sent[e.name] = { amount = moved, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
+  passedOn[e.from] = (passedOn[e.from] or 0) + moved
+  lastWork = "sent " .. commas(moved) .. " " .. e.from .. " to " .. e.how
+  return "sent " .. commas(moved) .. " " .. e.from
+end
+
+local function step()
+  local now = os.clock()
+  local busy = aeBusy()
+  local craftTier = nil   -- crafts only for the lowest tier still short
+  table.sort(LIST, function(a, b) if a.tier ~= b.tier then return a.tier < b.tier end return a.name < b.name end)
+  for _, e in ipairs(LIST) do
+    local have = count(e.name)
+    if have == nil then
+      status[e.name] = "never seen: put one in AE"
+      if e.how == "redstone" then rs.setOutput(e.side, false) end
+    else
+      local short = e.keep - have
+      if short > 0 then lowSince[e.name] = lowSince[e.name] or now else lowSince[e.name] = nil end
+      if e.how == "redstone" then
+        rs.setOutput(e.side, short > 0)
+        status[e.name] = short > 0 and ("ON (" .. e.side .. ")") or "ok"
+      elseif short <= 0 then
+        status[e.name] = "ok"
+        sent[e.name] = nil
+      elseif e.how == "craft" then
+        local c = sent[e.name]
+        -- a request still on its way: done once the stock rose by it; one that never arrives (no
+        -- pattern, missing materials) backs off and stops holding up the tiers above it
+        if c and c.retryAt then
+          if now >= c.retryAt then sent[e.name], c = nil, nil end
+        elseif c and (have >= c.startCount + c.amount) then
+          sent[e.name], c = nil, nil
+        elseif c and now - c.since > CFG.stuckAfter and not busy then
+          c.retryAt = now + CFG.backoff
+        end
+        if c and c.retryAt then
+          status[e.name] = "STUCK: no pattern or materials? retry in " .. math.ceil((c.retryAt - now) / 60) .. " min"
+        elseif c then
+          craftTier = craftTier or e.tier
+          status[e.name] = "crafting " .. commas(c.amount)
+        elseif busy then
+          status[e.name] = "waiting: AE busy"
+        elseif craftTier and e.tier > craftTier then
+          status[e.name] = "waiting for tier " .. craftTier
+        else
+          craftTier = e.tier
+          local n = math.min(short, CFG.craftBatch)
+          local i = ids[e.name]
+          if pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then
+            sent[e.name] = { amount = n, since = now, startCount = have }
+            status[e.name] = "crafting " .. commas(n)
+            lastWork = "asked AE for " .. commas(n) .. " " .. e.name
+          else
+            sent[e.name] = { amount = n, since = now, startCount = have, retryAt = now + CFG.backoff }
+            status[e.name] = "craft request failed (no pattern?)"
+            craftTier = nil   -- a refused request doesn't hold up the tiers above
+          end
+        end
+      elseif e.how == "smelt" or e.how == "pulverize" then
+        status[e.name] = process(e, have, short, now)
+      else
+        status[e.name] = "low"
+      end
+      e.have = have
+    end
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- screen: the computer's own, plus a monitor if one is attached
+
+local function draw(dev)
+  local w, h = dev.getSize()
+  dev.setBackgroundColour(colours.black)
+  dev.clear()
+  dev.setCursorPos(1, 1)
+  dev.setTextColour(colours.yellow)
+  dev.write("stockkeep  " .. (aeName or "no AE found") .. (controller and "" or "  (no controller: won't wait for your jobs)"))
+  local y = 3
+  local low, ok = {}, 0
+  for _, e in ipairs(LIST) do
+    if status[e.name] == "ok" then ok = ok + 1 else low[#low + 1] = e end
+  end
+  dev.setCursorPos(1, 2)
+  dev.setTextColour(colours.lightGrey)
+  dev.write(ok .. " of " .. #LIST .. " stocked. " .. lastWork)
+  for _, e in ipairs(low) do
+    if y > h then break end
+    local st = status[e.name] or ""
+    local colour = colours.white
+    if st:find("STUCK") or st:find("never") or st:find("failed") or st:find("can't") then colour = colours.red
+    elseif st:find("waiting") then colour = colours.lightGrey end
+    dev.setCursorPos(1, y)
+    dev.setTextColour(colours.white)
+    local name = e.name
+    if #name > 24 then name = name:sub(1, 23) .. "." end
+    dev.write(name)
+    dev.setCursorPos(26, y)
+    dev.setTextColour(colours.lightBlue)
+    dev.write((e.have and commas(e.have) or "?") .. "/" .. commas(e.keep))
+    dev.setCursorPos(42, y)
+    dev.setTextColour(colour)
+    dev.write(st:sub(1, math.max(1, w - 41)))
+    y = y + 1
+  end
+end
+
+local function drawAll()
+  pcall(draw, term)
+  for _, name in ipairs(peripheral.getNames()) do
+    if peripheral.getType(name) == "monitor" then
+      local m = peripheral.wrap(name)
+      pcall(function() m.setTextScale(0.5); draw(m) end)
+    end
+  end
+end
+
+---------------------------------------------------------------------------------------------------
+-- main loop
+
+loadIds()
+findAE()
+if not ae then
+  print("No ME block found. Put a wired modem on an ME Interface (and this computer), right-click")
+  print("both so they turn red, then run stockkeep again.")
+  return
+end
+scanIds()
+local lastScan = os.clock()
+local timer = os.startTimer(0)
+while true do
+  local event, p1 = os.pullEventRaw()
+  if event == "timer" and p1 == timer then
+    if not ae then findAE() end
+    if ae then
+      if os.clock() - lastScan >= CFG.rescan then scanIds(); lastScan = os.clock() end
+      local ok, err = pcall(step)
+      if not ok then lastWork = "error: " .. tostring(err) end
+    end
+    drawAll()
+    timer = os.startTimer(CFG.check)
+  elseif event == "peripheral" or event == "peripheral_detach" then
+    findAE()
+  elseif (event == "key" and p1 == keys.q) or event == "terminate" then
+    for _, e in ipairs(LIST) do if e.how == "redstone" then rs.setOutput(e.side, false) end end
+    term.setBackgroundColour(colours.black); term.clear(); term.setCursorPos(1, 1)
+    print("stockkeep stopped (redstone outputs off).")
+    return
+  end
+end
