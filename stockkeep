@@ -29,13 +29,15 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v36"   -- shown on screen; goes up by one with every release
+local VERSION = "v37"   -- shown on screen; goes up by one with every release
 
 local CFG = {
   check         = 30,        -- seconds between checks
   smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
   pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
-  craftBatch    = 1024,      -- most of one item asked for in one crafting request
+  craftBatch    = 256,       -- most of one item asked for in one crafting request
+  overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
+  craftAhead    = 1024,      -- with a controller: keep asking (a chunk per check) while AE has fewer than this queued
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
   flowCheck     = 5,         -- seconds between sends for smelt all / pulverize all
   trip          = 60,        -- seconds: a sent batch counts as still at the machines at least this long
@@ -447,76 +449,136 @@ local function step()
       elseif e.how == "craft" and e.editedAt and now - e.editedAt < CFG.settle then
         status[e.name] = "starts in " .. math.ceil(CFG.settle - (now - e.editedAt)) .. " s"   -- still being set
       elseif e.how == "craft" then
-        local c = sent[e.name]
         local i = ids[e.name]
-        local left = jobs and jobs[i.id .. ":" .. i.dmg]   -- AE's own count still to make
-        if jobs and left and not c then
-          -- a job for it already (asked for by hand, or before a restart): follow that one
-          c = { amount = left, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0, adopted = true }
-          sent[e.name] = c
-        end
-        if c and c.retryAt then
-          if now >= c.retryAt then sent[e.name], c = nil, nil end
-        elseif c and jobs then
-          -- with a controller: AE's job list says it all
-          -- (AE1 lists every request the moment it's made, so gone from the list = finished, even
-          -- when the stock didn't rise because other crafts used it up as fast as it was made.)
-          local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
-          if not left then
-            vanished[e.name] = (c.left or made > 0) and 0 or (vanished[e.name] or 0) + 1   -- c.left: AE had listed it
-            if vanished[e.name] >= 3 then
-              -- three jobs in a row gone with nothing to show: maybe AE drops it; wait a bit
+        local key = i.id .. ":" .. i.dmg
+        if jobs then
+          -- With a controller: AE's job list says how many are still to be made. Ask only for what
+          -- that doesn't already cover, a chunk (CFG.craftBatch) at a time, with the next chunk
+          -- queued while one runs, so the machines never wait and a row ends at most a chunk's
+          -- worth of machine contents over its target.
+          local r = sent[e.name] or {}
+          sent[e.name] = r
+          local queued = jobs[key] or 0
+          if queued ~= (r.lastQ or 0) then
+            if queued < (r.lastQ or 0) or not r.movedAt then r.movedAt = now end
+            r.lastQ = queued
+          end
+          if queued == 0 then r.movedAt = nil end
+          local waiting = queued > 0 and r.movedAt and now - r.movedAt > CFG.stuckAfter
+          local need = e.keep - have - queued
+          if r.retryAt and now >= r.retryAt then r.retryAt, r.dropped = nil, nil end
+          if r.retryAt then
+            status[e.name] = (r.dropped and "AE dropped it 3 times (pattern?); again in " or "STUCK: no pattern? retry in ") .. math.ceil((r.retryAt - now) / 60) .. " min"
+          elseif waiting then
+            -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
+            status[e.name] = "AE waiting on ingredients (" .. commas(queued) .. " left)"
+          elseif need > 0 and queued < CFG.craftAhead and not (craftTier and e.tier > craftTier) then
+            craftTier = craftTier or e.tier
+            -- chunks of CFG.craftBatch until CFG.craftAhead are queued (or the need is covered)
+            local asked = 0
+            while need > 0 and queued + asked < CFG.craftAhead do
+              local n = math.min(need, CFG.craftBatch, CFG.craftAhead - queued - asked)
+              if not pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then break end
+              asked, need = asked + n, need - n
+            end
+            -- AE1 lists a job the moment it takes it on: look right away
+            local after = asked > 0 and aeJobs() or nil
+            if after and (after[key] or 0) > queued then
               vanished[e.name] = 0
-              c.retryAt, c.dropped = now + CFG.dropWait, true
+              r.lastQ, r.movedAt = after[key], now
+              status[e.name] = commas(after[key]) .. " left"
+              lastWork = "asked AE for " .. commas(asked) .. " " .. displayName(e.name)
             else
-              sent[e.name], c = nil, nil   -- finished; asked again below if still short
+              -- not taken on (no pattern?): try again next check; three times in a row, wait a bit
+              vanished[e.name] = (vanished[e.name] or 0) + 1
+              if vanished[e.name] >= 3 then
+                vanished[e.name] = 0
+                r.retryAt, r.dropped = now + CFG.dropWait, true
+              end
+              status[e.name] = "AE didn't take it (pattern?)"
+              craftTier = queued > 0 and craftTier or nil
             end
+          elseif queued > 0 then
+            craftTier = craftTier or e.tier
+            status[e.name] = commas(queued) .. " left"
+          elseif craftTier and e.tier > craftTier then
+            status[e.name] = "waiting for tier " .. craftTier
           else
-            if left < (c.left or math.huge) then c.left, c.since = left, now end
-            c.waiting = now - c.since > CFG.stuckAfter   -- nothing made for a while: missing ingredients
+            status[e.name] = "low"
           end
-        elseif c then
-          -- without one: done once the stock rose by it, counting what was sent straight on to a
-          -- machine (assemblies going to the furnaces). A craft that keeps delivering isn't stuck,
-          -- however long it takes; one that never delivers (no pattern, missing materials) backs
-          -- off and stops holding up the tiers above it.
-          local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
-          if made > (c.made or 0) then c.made, c.since = made, now end
-          if made >= c.amount then
-            sent[e.name], c = nil, nil
-          elseif now - c.since > CFG.stuckAfter then
-            c.retryAt = now + CFG.backoff
-          end
-        end
-        if c and c.retryAt then
-          status[e.name] = (c.dropped and "AE dropped it 3 times (pattern?); again in " or "STUCK: no pattern or materials? retry in ") .. math.ceil((c.retryAt - now) / 60) .. " min"
-        elseif c and c.waiting then
-          -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
-          status[e.name] = "AE waiting on ingredients (" .. commas(c.left) .. " left)"
-        elseif c then
-          craftTier = craftTier or e.tier
-          if c.left then
-            status[e.name] = commas(c.left) .. "/" .. commas(c.amount) .. " left"   -- still to make / asked for (short: the computer's screen is narrow)
-          else
-            status[e.name] = "crafting " .. commas(c.amount) .. ((c.made or 0) > 0 and (", " .. commas(c.made) .. " done") or "")
-          end
-        elseif craftTier and e.tier > craftTier then
-          status[e.name] = "waiting for tier " .. craftTier
         else
-          craftTier = e.tier
-          local n = math.min(short, CFG.craftBatch)
-          if pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then
-            sent[e.name] = { amount = n, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
-            if jobs then   -- AE lists a job the moment it takes it on: look once, right away
-              local now2 = aeJobs()
-              sent[e.name].left = now2 and now2[i.id .. ":" .. i.dmg]
+          local c = sent[e.name]
+          if c and not c.amount and not c.retryAt then sent[e.name], c = nil, nil end   -- (state from the controller path)
+          local i = ids[e.name]
+          local left = jobs and jobs[i.id .. ":" .. i.dmg]   -- AE's own count still to make
+          if jobs and left and not c then
+            -- a job for it already (asked for by hand, or before a restart): follow that one
+            c = { amount = left, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0, adopted = true }
+            sent[e.name] = c
+          end
+          if c and c.retryAt then
+            if now >= c.retryAt then sent[e.name], c = nil, nil end
+          elseif c and jobs then
+            -- with a controller: AE's job list says it all
+            -- (AE1 lists every request the moment it's made, so gone from the list = finished, even
+            -- when the stock didn't rise because other crafts used it up as fast as it was made.)
+            local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
+            if not left then
+              vanished[e.name] = (c.left or made > 0) and 0 or (vanished[e.name] or 0) + 1   -- c.left: AE had listed it
+              if vanished[e.name] >= 3 then
+                -- three jobs in a row gone with nothing to show: maybe AE drops it; wait a bit
+                vanished[e.name] = 0
+                c.retryAt, c.dropped = now + CFG.dropWait, true
+              else
+                sent[e.name], c = nil, nil   -- finished; asked again below if still short
+              end
+            else
+              if left < (c.left or math.huge) then c.left, c.since = left, now end
+              c.waiting = now - c.since > CFG.stuckAfter   -- nothing made for a while: missing ingredients
             end
-            status[e.name] = "crafting " .. commas(n)
-            lastWork = "asked AE for " .. commas(n) .. " " .. displayName(e.name)
+          elseif c then
+            -- without one: done once the stock rose by it, counting what was sent straight on to a
+            -- machine (assemblies going to the furnaces). A craft that keeps delivering isn't stuck,
+            -- however long it takes; one that never delivers (no pattern, missing materials) backs
+            -- off and stops holding up the tiers above it.
+            local made = have + (passedOn[e.name] or 0) - (c.passedAtStart or 0) - c.startCount
+            if made > (c.made or 0) then c.made, c.since = made, now end
+            if made >= c.amount then
+              sent[e.name], c = nil, nil
+            elseif now - c.since > CFG.stuckAfter then
+              c.retryAt = now + CFG.backoff
+            end
+          end
+          if c and c.retryAt then
+            status[e.name] = (c.dropped and "AE dropped it 3 times (pattern?); again in " or "STUCK: no pattern or materials? retry in ") .. math.ceil((c.retryAt - now) / 60) .. " min"
+          elseif c and c.waiting then
+            -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
+            status[e.name] = "AE waiting on ingredients (" .. commas(c.left) .. " left)"
+          elseif c then
+            craftTier = craftTier or e.tier
+            if c.left then
+              status[e.name] = commas(c.left) .. "/" .. commas(c.amount) .. " left"   -- still to make / asked for (short: the computer's screen is narrow)
+            else
+              status[e.name] = "crafting " .. commas(c.amount) .. ((c.made or 0) > 0 and (", " .. commas(c.made) .. " done") or "")
+            end
+          elseif craftTier and e.tier > craftTier then
+            status[e.name] = "waiting for tier " .. craftTier
           else
-            sent[e.name] = { amount = n, since = now, startCount = have, retryAt = now + CFG.backoff }
-            status[e.name] = "craft request failed (no pattern?)"
-            craftTier = nil   -- a refused request doesn't hold up the tiers above
+            craftTier = e.tier
+            local n = math.min(short, CFG.craftBatch)
+            if pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then
+              sent[e.name] = { amount = n, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
+              if jobs then   -- AE lists a job the moment it takes it on: look once, right away
+                local now2 = aeJobs()
+                sent[e.name].left = now2 and now2[i.id .. ":" .. i.dmg]
+              end
+              status[e.name] = "crafting " .. commas(n)
+              lastWork = "asked AE for " .. commas(n) .. " " .. displayName(e.name)
+            else
+              sent[e.name] = { amount = n, since = now, startCount = have, retryAt = now + CFG.backoff }
+              status[e.name] = "craft request failed (no pattern?)"
+              craftTier = nil   -- a refused request doesn't hold up the tiers above
+            end
           end
         end
       elseif e.how == "smelt" or e.how == "pulverize" then
@@ -806,10 +868,22 @@ end
 -- seconds (so a row doesn't jump away while you're still setting it). True if the order changed.
 -- What a monitor lists: everything, or ("Needs" mode, tapped in its header) only the rows that
 -- aren't satisfied, like the computer's own screen.
+-- Made to a target and well past it (CFG.overAlert or more): worth a look, e.g. a leftover AE
+-- job. Smelt all / pulverize all rows sit above their reserve on purpose, so not those.
+local function overBy(e)
+  if e.how ~= "craft" and e.how ~= "smelt" and e.how ~= "pulverize" then return nil end
+  local over = (e.have or 0) - e.keep
+  if e.keep > 0 and over >= CFG.overAlert then return over end
+  return nil
+end
+
 local function monitorRows(mon)
   if ui.pages["mode:" .. mon] ~= "needs" then return LIST end
-  local list = {}
-  for _, e in ipairs(LIST) do if not satisfied(e) then list[#list + 1] = e end end
+  local list, over = {}, {}
+  for _, e in ipairs(LIST) do
+    if not satisfied(e) then list[#list + 1] = e elseif overBy(e) then over[#over + 1] = e end
+  end
+  for _, e in ipairs(over) do list[#list + 1] = e end   -- the overshoots, after what's short
   return list
 end
 
@@ -929,8 +1003,10 @@ local function drawMonitor(m, name, place)
     button(m, cBtn, y, " - ", colours.grey, "less", e)
     button(m, cBtn + 4, y, " + ", colours.grey, "more", e)
     button(m, cBtn + 8, y, ui.confirm == e and "sure?" or " x ", colours.red, "remove", e)
-    m.setCursorPos(cSt, y); m.setTextColour(statusColour(status[e.name]))
-    m.write((status[e.name] or ""):sub(1, math.max(1, w - cSt + 1)))
+    local st, stColour = status[e.name] or "", statusColour(status[e.name])
+    if needsMode and satisfied(e) and overBy(e) then st, stColour = "OVER +" .. compact(overBy(e)), colours.orange end
+    m.setCursorPos(cSt, y); m.setTextColour(stColour)
+    m.write(st:sub(1, math.max(1, w - cSt + 1)))
   end
 end
 
