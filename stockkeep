@@ -250,6 +250,7 @@ end
 ---------------------------------------------------------------------------------------------------
 -- the work
 
+local displayName  -- the readable name of an item (defined with the screen code below)
 local sent = {}       -- name -> { amount, since, startCount } for smelt/pulverize batches
 local lowSince = {}   -- name -> os.clock() when it first went below target
 local status = {}     -- name -> text
@@ -273,21 +274,21 @@ local function process(e, have, short, now)
     local gained = have - s.startCount + (passedOn[e.name] or 0) - s.passedAtStart
     if s.retryAt then
       if now < s.retryAt then
-        return "STUCK: " .. commas(s.amount) .. " " .. e.from .. " never came back; retry in " .. math.ceil((s.retryAt - now) / 60) .. " min"
+        return "STUCK: " .. commas(s.amount) .. " " .. displayName(e.from) .. " never came back; retry in " .. math.ceil((s.retryAt - now) / 60) .. " min"
       end
       sent[e.name] = nil
     elseif gained >= s.amount * e.per or have >= e.keep then
       sent[e.name] = nil
     elseif now - s.since > CFG.stuckAfter then
       s.retryAt = now + CFG.backoff
-      return "STUCK: " .. commas(s.amount) .. " " .. e.from .. " sent " .. math.floor((now - s.since) / 60) .. " min ago"
+      return "STUCK: " .. commas(s.amount) .. " " .. displayName(e.from) .. " sent " .. math.floor((now - s.since) / 60) .. " min ago"
     else
       return "processing " .. commas(s.amount * e.per)
     end
   end
   if not e.from then return "no input: use " .. e.how .. " all, or re-add it" end
   local fromId = ids[e.from]
-  if not fromId then return "needs " .. e.from .. " (never seen)" end
+  if not fromId then return "needs " .. displayName(e.from) .. " (never seen)" end
   -- a raw material on the list (how = "watch") is only spent down to its own target;
   -- intermediates (dust on its way to ingots) can be used up, their own rule refills them
   local available = count(e.from) or 0
@@ -295,15 +296,15 @@ local function process(e, have, short, now)
   if fromEntry and fromEntry.how == "watch" then available = available - fromEntry.keep end
   local need = math.ceil(short / e.per)
   local n = math.min(need, available, CFG.sendBatch)
-  if n <= 0 then return "short, no " .. e.from end
+  if n <= 0 then return "short, no " .. displayName(e.from) end
   local dir = e.how == "smelt" and CFG.smeltChest or CFG.pulverizeChest
   local moved = sendTo(fromId, n, dir)
   moved = tonumber(moved) or 0
   if moved <= 0 then return "can't reach the " .. e.how .. " chest (" .. dir .. ")" end
   sent[e.name] = { amount = moved, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
   passedOn[e.from] = (passedOn[e.from] or 0) + moved
-  lastWork = "sent " .. commas(moved) .. " " .. e.from .. " to " .. e.how
-  return "sent " .. commas(moved) .. " " .. e.from
+  lastWork = "sent " .. commas(moved) .. " " .. displayName(e.from) .. " to " .. e.how
+  return "sent " .. commas(moved) .. " " .. displayName(e.from)
 end
 
 -- smelt all / pulverize all: input-driven, like an export bus. Everything above the reserve
@@ -323,7 +324,7 @@ local function flow()
           sentTotal[e.name] = (sentTotal[e.name] or 0) + moved
           status[e.name] = "sent " .. commas(sentTotal[e.name]) .. " so far"
           have = have - moved
-          lastWork = "sent " .. commas(moved) .. " " .. e.name .. " to " .. e.how:sub(1, -5)
+          lastWork = "sent " .. commas(moved) .. " " .. displayName(e.name) .. " to " .. e.how:sub(1, -5)
         else
           status[e.name] = "waiting: " .. e.how:sub(1, -5) .. " chest full"
         end
@@ -386,7 +387,7 @@ local function step()
           if pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then
             sent[e.name] = { amount = n, since = now, startCount = have }
             status[e.name] = "crafting " .. commas(n)
-            lastWork = "asked AE for " .. commas(n) .. " " .. e.name
+            lastWork = "asked AE for " .. commas(n) .. " " .. displayName(e.name)
           else
             sent[e.name] = { amount = n, since = now, startCount = have, retryAt = now + CFG.backoff }
             status[e.name] = "craft request failed (no pattern?)"
@@ -568,7 +569,7 @@ local AE_NAMES = {
   ["AppEng.Blocks.TinyTNT"] = "Tiny TNT",
 }
 
-local function displayName(name)
+function displayName(name)   -- (declared local above, near the work)
   local base = name:gsub("%.name$", "")
   local known = AE_NAMES[name] or AE_NAMES[base]
   if known then return known end
@@ -820,7 +821,7 @@ local function addFromChest()
     ui.message = "Put the item in slot 1 of the chest (and its input in slot 2 to smelt or pulverize it)."
     return
   end
-  if byName[item.name] then ui.message = item.name .. " is already on the list."; return end
+  if byName[item.name] then ui.message = displayName(item.name) .. " is already on the list."; return end
   ids[item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize }
   local e = { name = item.name, keep = 256, tier = 5, how = "craft", per = 1 }
   if type(input) == "table" and input.name and input.name ~= "empty" then
@@ -868,9 +869,9 @@ local function touch(mon, x, y)
         if isAll and not wasAll then e.keepBefore, e.keep = e.keep, 0
         elseif wasAll and not isAll and e.keepBefore then e.keep, e.keepBefore = e.keepBefore, nil end
         if (e.how == "smelt" or e.how == "pulverize") and not e.from then
-          ui.message = e.how .. " makes " .. e.name .. " to a target and needs its input (chest slot 2). Keep tapping for " .. e.how .. " all."
+          ui.message = e.how .. " makes " .. displayName(e.name) .. " to a target and needs its input (chest slot 2). Keep tapping for " .. e.how .. " all."
         else
-          ui.message = e.name .. ": " .. methodLabel(e) .. "."
+          ui.message = displayName(e.name) .. ": " .. methodLabel(e) .. "."
         end
         sent[e.name] = nil
         saveList()
@@ -880,7 +881,7 @@ local function touch(mon, x, y)
           for i, other in ipairs(LIST) do if other == e then table.remove(LIST, i); break end end
           ui.confirm = nil
           saveList(); reindex()
-          ui.message = "Removed " .. e.name .. "."
+          ui.message = "Removed " .. displayName(e.name) .. "."
         else
           ui.confirm, ui.confirmAt = e, os.clock()
         end
