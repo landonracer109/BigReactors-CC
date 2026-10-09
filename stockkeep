@@ -630,13 +630,24 @@ local ui = { page = 1, hits = {}, message = "Tap - / + to change amounts, the me
              editedAt = -math.huge }
 local SETTLE = 20   -- seconds after the last change before the list sorts itself again
 
+-- The screen groups rows by method, A-Z by name inside each group. (The checks work through
+-- the list by tier; this order is only for finding things.)
+local METHOD_ORDER = { pulverize = 1, ["pulverize all"] = 2, smelt = 3, ["smelt all"] = 4, craft = 5, redstone = 6, watch = 7 }
+local function byMethod(a, b)
+  local ma, mb = METHOD_ORDER[a.how] or 8, METHOD_ORDER[b.how] or 8
+  if ma ~= mb then return ma < mb end
+  local na, nb = displayName(a.name), displayName(b.name)
+  if na ~= nb then return na < nb end
+  return a.name < b.name
+end
+
 -- Sorts the screen's list by tier and name, unless something was changed in the last SETTLE
 -- seconds (so a row doesn't jump away while you're still setting it). True if the order changed.
 local function settleList()
   if os.clock() - ui.editedAt < SETTLE then return false end
   local before = {}
   for i, e in ipairs(LIST) do before[i] = e end
-  table.sort(LIST, byTier)
+  table.sort(LIST, byMethod)
   local moved = false
   for i, e in ipairs(LIST) do if before[i] ~= e then moved = true end end
   -- follow the row last changed to its new page
