@@ -210,15 +210,21 @@ local function reindex()
   end
 end
 
+local displayName  -- the readable name of an item (defined with the screen code below)
+
 local function scanIds()
   local all = try(ae, "getAvailableItems")
   if type(all) ~= "table" then return end
   local changed = false
   for _, s in pairs(all) do
-    if type(s) == "table" and s.name and wanted[s.name] then
-      local known = ids[s.name]
-      if not known or known.id ~= s.id or known.dmg ~= s.dmg or known.max ~= s.maxSize then
-        ids[s.name] = { id = s.id, dmg = s.dmg, max = s.maxSize }
+    if type(s) == "table" and s.name then
+      -- a row can name an item the way AE reports it ("AppEng.Materials.BasicProcessorAssembly")
+      -- or by its readable name ("Basic Processor Assembly", as the starting list does)
+      local key = wanted[s.name] and s.name or nil
+      if not key then local shown = displayName(s.name); if shown ~= s.name and wanted[shown] then key = shown end end
+      local known = key and ids[key]
+      if key and (not known or known.id ~= s.id or known.dmg ~= s.dmg or known.max ~= s.maxSize) then
+        ids[key] = { id = s.id, dmg = s.dmg, max = s.maxSize }
         changed = true
       end
     end
@@ -250,7 +256,6 @@ end
 ---------------------------------------------------------------------------------------------------
 -- the work
 
-local displayName  -- the readable name of an item (defined with the screen code below)
 local sent = {}       -- name -> { amount, since, startCount } for smelt/pulverize batches
 local lowSince = {}   -- name -> os.clock() when it first went below target
 local status = {}     -- name -> text
@@ -310,7 +315,9 @@ end
 -- smelt all / pulverize all: input-driven, like an export bus. Everything above the reserve
 -- (keep) goes to the machine chest, a stack per call until the chest is full; run often.
 local function flow()
-  for _, e in ipairs(LIST) do
+  local rows = {}   -- a copy: the screen task can change the list while this waits on AE
+  for i, e in ipairs(LIST) do rows[i] = e end
+  for _, e in ipairs(rows) do
     if (e.how == "smelt all" or e.how == "pulverize all") and ids[e.name] then
       local have = count(e.name) or 0
       local extra = have - e.keep
@@ -821,7 +828,7 @@ local function addFromChest()
     ui.message = "Put the item in slot 1 of the chest (and its input in slot 2 to smelt or pulverize it)."
     return
   end
-  if byName[item.name] then ui.message = displayName(item.name) .. " is already on the list."; return end
+  if byName[item.name] or byName[displayName(item.name)] then ui.message = displayName(item.name) .. " is already on the list."; return end
   ids[item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize }
   local e = { name = item.name, keep = 256, tier = 5, how = "craft", per = 1 }
   if type(input) == "table" and input.name and input.name ~= "empty" then
@@ -907,15 +914,17 @@ if not ae then
 end
 scanIds()
 
--- One heartbeat timer, started again only after the work is done. CC 1.63 throws away any event
--- that arrives while a peripheral call is waiting for its answer, so a second timer running
--- alongside the AE calls can be lost, and its loop never comes back.
-local lastScan = os.clock()
-local lastStep, lastFlow = -math.huge, -math.huge
-local timer = os.startTimer(0)
-while true do
-  local event, p1, p2, p3 = os.pullEventRaw()
-  if event == "timer" and p1 == timer then
+-- Two tasks side by side. CC 1.63 throws away every event that arrives while a program waits for a
+-- peripheral call's answer; AE calls are slow, so a single loop missed many monitor taps (and
+-- could lose its own timer). parallel hands each event to both tasks: the screen task always
+-- hears a tap, even while the work task is waiting on AE.
+
+-- the work: a heartbeat timer, started again only after the work is done, so it can't fire
+-- (and be lost) during this task's own AE calls
+local function work()
+  local lastScan = os.clock()
+  local lastStep, lastFlow = -math.huge, -math.huge
+  while true do
     if not ae then findAE() end
     local redraw = not ae
     if ae then
@@ -938,18 +947,29 @@ while true do
     end
     if settleList() then redraw = true end
     if redraw then drawAll() end
-    timer = os.startTimer(1)
-  elseif event == "monitor_touch" then
-    local ok, changed = pcall(touch, p1, p2, p3)
-    if not ok then lastWork = "error: " .. tostring(changed) end
-    if not ok or changed then drawAll() end
-    timer = os.startTimer(1)   -- the old one may have fired during touch's AE calls
-  elseif event == "peripheral" or event == "peripheral_detach" then
-    findAE()
-  elseif (event == "key" and p1 == keys.q) or event == "terminate" then
-    for _, e in ipairs(LIST) do if e.how == "redstone" then rs.setOutput(e.side, false) end end
-    term.setBackgroundColour(colours.black); term.clear(); term.setCursorPos(1, 1)
-    print("stockkeep stopped (redstone outputs off).")
-    return
+    local timer = os.startTimer(1)
+    repeat local _, id = os.pullEventRaw("timer") until id == timer
   end
 end
+
+-- the screen: taps, peripherals coming and going, and q to stop
+local function screen()
+  while true do
+    local event, p1, p2, p3 = os.pullEventRaw()
+    if event == "monitor_touch" then
+      local ok, changed = pcall(touch, p1, p2, p3)
+      if not ok then lastWork = "error: " .. tostring(changed) end
+      if not ok or changed then drawAll() end
+    elseif event == "peripheral" or event == "peripheral_detach" then
+      findAE()
+    elseif (event == "key" and p1 == keys.q) or event == "terminate" then
+      return
+    end
+  end
+end
+
+drawAll()
+parallel.waitForAny(work, screen)
+for _, e in ipairs(LIST) do if e.how == "redstone" then rs.setOutput(e.side, false) end end
+term.setBackgroundColour(colours.black); term.clear(); term.setCursorPos(1, 1)
+print("stockkeep stopped (redstone outputs off).")
