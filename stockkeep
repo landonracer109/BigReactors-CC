@@ -34,13 +34,13 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.71"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.80"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
   smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
   pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
-  craftBatch    = 256,       -- most of one item asked for in one crafting request
+  craftBatch    = 1024,      -- most of one item asked for in one AE job (only one job per item at a time)
   resetEvery    = 300,       -- seconds: at most this often, clear a stuck AE with the reset drive
   tierHold      = 0.5,       -- a craft row below this share of its target makes higher tiers wait
   trendWindow   = 3600,      -- seconds of counts a Trends monitor works its per-hour rates from
@@ -59,7 +59,6 @@ local CFG = {
   fuzzyBatch    = 256,       -- most damageable items trashed per look
   fuzzyEvery    = 60,        -- seconds between full looks for damaged copies of a trash all item
   overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
-  craftAhead    = 1024,      -- with a controller: keep asking (a chunk per check) while AE has fewer than this queued
   craftMin      = 512,       -- wait until a craft, smelt or pulverize row is this far below its keep (or a quarter
                              -- of the keep, if less), then refill it in one go: fewer, bigger jobs and sends
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
@@ -731,10 +730,11 @@ local function step()
         local i = ids[e.name]
         local key = i.id .. ":" .. i.dmg
         if jobs then
-          -- With a controller: AE's job list says how many are still to be made. Ask only for what
-          -- that doesn't already cover, a chunk (CFG.craftBatch) at a time, with the next chunk
-          -- queued while one runs, so the machines never wait and a row ends at most a chunk's
-          -- worth of machine contents over its target.
+          -- With a controller: AE's job list says how many are still to be made. Only one AE job per
+          -- item at a time: AE1 credits what comes back to the oldest job for that item, and a job
+          -- whose count is filled that way is closed with its remaining pushes dropped, so with
+          -- several jobs at once more is owed than will ever be made, and the last job waits
+          -- forever (machine idle, nothing missing). One job at a time can't come up short.
           local r = sent[e.name] or {}
           sent[e.name] = r
           local queued = jobs[key] or 0
@@ -758,15 +758,11 @@ local function step()
           elseif waiting then
             -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
             status[e.name] = "AE waiting on ingredients (" .. commas(queued) .. " left)"
-          elseif need >= minAsk and queued < CFG.craftAhead and not (craftTier and e.tier > craftTier) then
+          elseif need >= minAsk and queued == 0 and not (craftTier and e.tier > craftTier) then
             if holds then craftTier = craftTier or e.tier end
-            -- chunks of CFG.craftBatch until CFG.craftAhead are queued (or the need is covered)
-            local asked = 0
-            while need > 0 and queued + asked < CFG.craftAhead do
-              local n = math.min(need, CFG.craftBatch, CFG.craftAhead - queued - asked)
-              if not pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then break end
-              asked, need = asked + n, need - n
-            end
+            -- the whole shortfall as one job (up to CFG.craftBatch)
+            local asked = math.min(need, CFG.craftBatch)
+            if not pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = asked }) then asked = 0 end
             -- AE1 lists a job the moment it takes it on: look right away
             local after = asked > 0 and aeJobs() or nil
             -- (a small craft can be done before this look: then the count went up instead)
