@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.52"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.53"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -681,10 +681,12 @@ local function step()
             end
             -- AE1 lists a job the moment it takes it on: look right away
             local after = asked > 0 and aeJobs() or nil
-            if after and (after[key] or 0) > queued then
+            -- (a small craft can be done before this look: then the count went up instead)
+            local nowHave = after and not ((after[key] or 0) > queued) and count(e.name) or nil
+            if after and ((after[key] or 0) > queued or (nowHave and nowHave > have)) then
               vanished[e.name] = 0
-              r.lastQ, r.movedAt = after[key], now
-              status[e.name] = commas(after[key]) .. " left"
+              r.lastQ, r.movedAt = after[key] or 0, now
+              status[e.name] = (after[key] or 0) > 0 and (commas(after[key]) .. " left") or "crafted"
               lastWork = "asked AE for " .. commas(asked) .. " " .. displayName(e.name)
               logEvent(lastWork)
             else
@@ -1243,6 +1245,7 @@ local function drawMonitor(m, name, place)
     button(m, cBtn + 8, y, ui.confirm == e and "sure?" or " x ", colours.red, "remove", e)
     local st, stColour = status[e.name] or "", statusColour(status[e.name])
     if needsMode and satisfied(e) and overBy(e) then st, stColour = "OVER +" .. compact(overBy(e)), colours.orange end
+    ui.drawing[#ui.drawing + 1] = { x1 = cSt, x2 = w, y = y, action = "status", e = e }   -- tap to read it in full
     m.setCursorPos(cSt, y); m.setTextColour(stColour)
     m.write(st:sub(1, math.max(1, w - cSt + 1)))
   end
@@ -1329,7 +1332,7 @@ local function touch(mon, x, y)
     if y == hit.y and x >= hit.x1 and x <= hit.x2 then
       local e = hit.e
       if hit.action ~= "remove" then ui.confirm = nil end
-      local browsing = hit.action == "name" or hit.action == "prev" or hit.action == "next" or hit.action == "mode"
+      local browsing = hit.action == "name" or hit.action == "status" or hit.action == "prev" or hit.action == "next" or hit.action == "mode"
       if not browsing then
         ui.editedAt, ui.edited, ui.editedOn = os.clock(), e, mon
         if e then e.editedAt = os.clock() end   -- this row waits until you're done with it
@@ -1343,6 +1346,8 @@ local function touch(mon, x, y)
           for i, r in ipairs(list) do if r == ui.edited then ui.pages[mon] = math.ceil(i / (ui.rows[mon] or 1)) end end
           savePages()
         end
+      elseif hit.action == "status" then
+        ui.message = displayName(e.name) .. ": " .. (status[e.name] or "no status yet")
       elseif hit.action == "name" then
         ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from) .. ((e.per or 1) > 1 and (", " .. e.per .. " each") or "")) or "")
       elseif hit.action == "mode" then
