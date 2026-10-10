@@ -32,7 +32,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.42"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.43"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -40,6 +40,7 @@ local CFG = {
   pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
   craftBatch    = 256,       -- most of one item asked for in one crafting request
   resetEvery    = 600,       -- seconds: at most this often, clear a stuck AE with the reset drive
+  tierHold      = 0.5,       -- a craft row below this share of its target makes higher tiers wait
   jobStall      = 300,       -- seconds an AE job may go without progress before it's flagged as stuck
   overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
   craftAhead    = 1024,      -- with a controller: keep asking (a chunk per check) while AE has fewer than this queued
@@ -494,6 +495,10 @@ local function step()
       elseif e.how == "craft" and e.editedAt and now - e.editedAt < CFG.settle then
         status[e.name] = "starts in " .. math.ceil(CFG.settle - (now - e.editedAt)) .. " s"   -- still being set
       elseif e.how == "craft" then
+        -- a lower tier holds up the tiers above only while it's really short (below CFG.tierHold of
+        -- its target): an ingredient that's used as fast as it's made always has a little queued,
+        -- and must not keep everything above it waiting forever
+        local holds = have < e.keep * CFG.tierHold
         local i = ids[e.name]
         local key = i.id .. ":" .. i.dmg
         if jobs then
@@ -520,7 +525,7 @@ local function step()
             -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
             status[e.name] = "AE waiting on ingredients (" .. commas(queued) .. " left)"
           elseif need > 0 and queued < CFG.craftAhead and not (craftTier and e.tier > craftTier) then
-            craftTier = craftTier or e.tier
+            if holds then craftTier = craftTier or e.tier end
             -- chunks of CFG.craftBatch until CFG.craftAhead are queued (or the need is covered)
             local asked = 0
             while need > 0 and queued + asked < CFG.craftAhead do
@@ -546,7 +551,7 @@ local function step()
               craftTier = queued > 0 and craftTier or nil
             end
           elseif queued > 0 then
-            craftTier = craftTier or e.tier
+            if holds then craftTier = craftTier or e.tier end
             status[e.name] = commas(queued) .. " left"
           elseif craftTier and e.tier > craftTier then
             status[e.name] = "waiting for tier " .. craftTier
@@ -602,7 +607,7 @@ local function step()
             -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
             status[e.name] = "AE waiting on ingredients (" .. commas(c.left) .. " left)"
           elseif c then
-            craftTier = craftTier or e.tier
+            if holds then craftTier = craftTier or e.tier end
             if c.left then
               status[e.name] = commas(c.left) .. "/" .. commas(c.amount) .. " left"   -- still to make / asked for (short: the computer's screen is narrow)
             else
@@ -611,7 +616,7 @@ local function step()
           elseif craftTier and e.tier > craftTier then
             status[e.name] = "waiting for tier " .. craftTier
           else
-            craftTier = e.tier
+            if holds then craftTier = e.tier end
             local n = math.min(short, CFG.craftBatch)
             if pcall(ae.requestCrafting, { id = i.id, dmg = i.dmg, qty = n }) then
               sent[e.name] = { amount = n, since = now, startCount = have, passedAtStart = passedOn[e.name] or 0 }
