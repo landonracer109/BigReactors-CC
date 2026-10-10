@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.67"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.68"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -60,6 +60,8 @@ local CFG = {
   fuzzyEvery    = 60,        -- seconds between full looks for damaged copies of a trash all item
   overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
   craftAhead    = 1024,      -- with a controller: keep asking (a chunk per check) while AE has fewer than this queued
+  craftMin      = 64,        -- while AE still has some queued, wait until at least this many are needed before asking
+                             -- again: fewer, bigger AE jobs instead of a little one every check
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
   flowCheck     = 5,         -- seconds between sends for smelt all / pulverize all
   trip          = 60,        -- seconds: a sent batch counts as still at the machines at least this long
@@ -638,7 +640,8 @@ local function scanTrends(now)
     local out, back = {}, {}
     -- only real stock (a stack or more) running out: ores and junk passing through hit 0 all the time
     for shown, n in pairs(inAE) do if n >= 64 and (nowIn[shown] or 0) == 0 then out[#out + 1] = shown; gone[shown] = true end end
-    for shown in pairs(gone) do if (nowIn[shown] or 0) > 0 then back[#back + 1] = shown; gone[shown] = nil end end
+    for shown in pairs(gone) do if (nowIn[shown] or 0) > 0 then back[#back + 1] = shown end end
+    for _, shown in ipairs(back) do gone[shown] = nil end   -- (not while going through it: CC's Lua errors)
     table.sort(out); table.sort(back)
     local function list(t) return #t > 12 and (table.concat(t, ", ", 1, 12) .. " and " .. (#t - 12) .. " more") or table.concat(t, ", ") end
     if #out > 0 then logEvent("ran out in AE: " .. list(out)) end
@@ -748,7 +751,7 @@ local function step()
           elseif waiting then
             -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
             status[e.name] = "AE waiting on ingredients (" .. commas(queued) .. " left)"
-          elseif need > 0 and queued < CFG.craftAhead and not (craftTier and e.tier > craftTier) then
+          elseif need > 0 and (queued == 0 or need >= CFG.craftMin) and queued < CFG.craftAhead and not (craftTier and e.tier > craftTier) then
             if holds then craftTier = craftTier or e.tier end
             -- chunks of CFG.craftBatch until CFG.craftAhead are queued (or the need is covered)
             local asked = 0
