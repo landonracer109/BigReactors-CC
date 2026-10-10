@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.65"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.66"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -403,17 +403,25 @@ local lastResetItem = nil
 
 -- AE's crafting jobs, from the ME Controller: "id:dmg" -> how many are still to be made.
 -- (AE1 lists every request still running.) nil without a controller.
+local lastJobText = ""   -- AE's job list as text, for the log when a job sticks
 local function aeJobs()
   if not controller then return nil end
   local list = try(controller, "getJobList")
   if type(list) ~= "table" then return nil end
   local jobs = {}
+  local named = {}
   for _, j in pairs(list) do
     if type(j) == "table" and j.id then
       local key = j.id .. ":" .. (j.dmg or 0)
       jobs[key] = (jobs[key] or 0) + (tonumber(j.qty) or 0)
+      local shown = j.name and displayName(j.name) or key
+      named[shown] = (named[shown] or 0) + (tonumber(j.qty) or 0)
     end
   end
+  local parts = {}
+  for shown, n in pairs(named) do parts[#parts + 1] = shown .. " " .. commas(n) end
+  table.sort(parts)
+  lastJobText = #parts > 0 and table.concat(parts, ", ") or "none"
   return jobs
 end
 
@@ -597,6 +605,9 @@ local function byTier(a, b) if a.tier ~= b.tier then return a.tier < b.tier end 
 
 -- name -> amount in AE, for the items Trends monitors show (from the last listing)
 local trendHave, lastTrendScan = {}, -math.huge
+-- every item in AE by shown name, from the last listing: anything that runs out (or comes back)
+-- is logged, since AE1 can stall a craft for good when an ingredient is at 0 for a moment
+local inAE = nil
 local function trendWanted(shown)
   local low = shown:lower()
   for _, w in ipairs(CFG.trendAlso) do if low == w:lower() then return true end end
@@ -611,15 +622,27 @@ local function scanTrends(now)
   local all = try(ae, "getAvailableItems")
   if type(all) ~= "table" then return end
   local have = {}
+  local nowIn = {}
   for _, s in pairs(all) do
     if type(s) == "table" and s.name and (tonumber(s.maxdmg) or 0) == 0 then
       local shown = displayName(s.name)
+      if (tonumber(s.qty) or 0) > 0 then nowIn[shown] = true end
       if trendWanted(shown) then have[shown] = (have[shown] or 0) + (tonumber(s.qty) or 0) end
     end
   end
   -- something that's run out drops off AE's listing: it reads 0 rather than vanishing
   for shown in pairs(trendHave) do have[shown] = have[shown] or 0 end
   trendHave = have
+  if inAE then
+    local out, back = {}, {}
+    for shown in pairs(inAE) do if not nowIn[shown] then out[#out + 1] = shown end end
+    for shown in pairs(nowIn) do if not inAE[shown] then back[#back + 1] = shown end end
+    table.sort(out); table.sort(back)
+    local function list(t) return #t > 12 and (table.concat(t, ", ", 1, 12) .. " and " .. (#t - 12) .. " more") or table.concat(t, ", ") end
+    if #out > 0 then logEvent("ran out in AE: " .. list(out)) end
+    if #back > 0 then logEvent("back in AE: " .. list(back)) end
+  end
+  inAE = nowIn
   for shown, n in pairs(have) do addSample(shown, now, n) end
 end
 
@@ -848,6 +871,7 @@ local function step()
   aeStuck = stuckNow and stuckNow.name
   if aeStuck ~= loggedStuck then
     logEvent(aeStuck and ("AE stuck on " .. aeStuck .. " (no progress for " .. CFG.jobStall .. " s)") or ("AE moving again" .. (loggedStuck and (" (was stuck on " .. loggedStuck .. ")") or "")))
+    if aeStuck then logEvent("AE jobs then: " .. lastJobText) end
     loggedStuck = aeStuck
   end
   -- clear the jam ourselves when there's a reset drive (at most once per CFG.resetEvery)
