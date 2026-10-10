@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.66"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.67"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -607,7 +607,8 @@ local function byTier(a, b) if a.tier ~= b.tier then return a.tier < b.tier end 
 local trendHave, lastTrendScan = {}, -math.huge
 -- every item in AE by shown name, from the last listing: anything that runs out (or comes back)
 -- is logged, since AE1 can stall a craft for good when an ingredient is at 0 for a moment
-local inAE = nil
+local inAE = nil    -- shown name -> amount
+local gone = {}     -- what ran out (and was logged), to log when it's back
 local function trendWanted(shown)
   local low = shown:lower()
   for _, w in ipairs(CFG.trendAlso) do if low == w:lower() then return true end end
@@ -626,7 +627,7 @@ local function scanTrends(now)
   for _, s in pairs(all) do
     if type(s) == "table" and s.name and (tonumber(s.maxdmg) or 0) == 0 then
       local shown = displayName(s.name)
-      if (tonumber(s.qty) or 0) > 0 then nowIn[shown] = true end
+      nowIn[shown] = (nowIn[shown] or 0) + (tonumber(s.qty) or 0)
       if trendWanted(shown) then have[shown] = (have[shown] or 0) + (tonumber(s.qty) or 0) end
     end
   end
@@ -635,8 +636,9 @@ local function scanTrends(now)
   trendHave = have
   if inAE then
     local out, back = {}, {}
-    for shown in pairs(inAE) do if not nowIn[shown] then out[#out + 1] = shown end end
-    for shown in pairs(nowIn) do if not inAE[shown] then back[#back + 1] = shown end end
+    -- only real stock (a stack or more) running out: ores and junk passing through hit 0 all the time
+    for shown, n in pairs(inAE) do if n >= 64 and (nowIn[shown] or 0) == 0 then out[#out + 1] = shown; gone[shown] = true end end
+    for shown in pairs(gone) do if (nowIn[shown] or 0) > 0 then back[#back + 1] = shown; gone[shown] = nil end end
     table.sort(out); table.sort(back)
     local function list(t) return #t > 12 and (table.concat(t, ", ", 1, 12) .. " and " .. (#t - 12) .. " more") or table.concat(t, ", ") end
     if #out > 0 then logEvent("ran out in AE: " .. list(out)) end
