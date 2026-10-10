@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.80"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.81"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -1253,13 +1253,17 @@ local function button(dev, x, y, label, bg, action, e)
   ui.drawing[#ui.drawing + 1] = { x1 = x, x2 = x + #label - 1, y = y, action = action, e = e }
 end
 
-local monitorScale = {}   -- monitor -> text size chosen for it
+local monitorScale = {}   -- monitor name -> the size it had once its text size was set
 
 -- The biggest text that still leaves room for every column (80 characters across: an 8-wide
 -- monitor gets normal-size text, a 4-wide one the small size).
-local function fitScale(m)
+-- Set once per monitor (and again only if the monitor itself changes size): every text size
+-- change rebuilds the monitor's screen on the computer thread, and ComputerCraft 1.63 can crash
+-- the whole server if the main thread sends that screen to a player at the same moment. The
+-- monitors used to be re-wrapped and re-sized on every redraw.
+local function fitScale(m, name)
   local w0, h0 = m.getSize()
-  local key = tostring(m)
+  local key = name
   local known = monitorScale[key]
   if known and known.w == w0 and known.h == h0 then return end
   for _, s in ipairs({ 2, 1.5, 1, 0.5 }) do
@@ -1280,7 +1284,7 @@ local function band(m, y, w, bg)
 end
 
 local function drawMonitor(m, name, place)
-  fitScale(m)
+  fitScale(m, name)
   local w, h = m.getSize()
   m.setBackgroundColour(colours.black)
   m.clear()
