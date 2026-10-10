@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.60"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.61"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -1274,11 +1274,13 @@ local function drawMonitor(m, name, place)
     m.write(("AE STUCK on " .. aeStuck .. ": " .. (resetDrive and (resetNote or "resetting AE with the reset drive") or "shift-click it in the ME Crafting Monitor")):sub(1, w - 2))
     m.setBackgroundColour(colours.black)
   else
-    m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w - 2))
+    local note = trendsMode and "Ingots and alloys in AE, and how fast each is changing over the last hour." or ui.message
+    m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(note:sub(1, w - 2))
   end
   local nameW = math.max(10, w - 63)
   if trendsMode then
     -- Trends: what's in AE and how fast it's changing, from the last hour of counts
+    nameW = math.max(10, w - 48)   -- (fewer columns here: room for whole names)
     local cHave, cRate, cSpan = nameW + 2, nameW + 16, nameW + 32
     band(m, 3, w, colours.grey)
     m.setTextColour(colours.white)
