@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.68"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.69"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -60,8 +60,8 @@ local CFG = {
   fuzzyEvery    = 60,        -- seconds between full looks for damaged copies of a trash all item
   overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
   craftAhead    = 1024,      -- with a controller: keep asking (a chunk per check) while AE has fewer than this queued
-  craftMin      = 64,        -- while AE still has some queued, wait until at least this many are needed before asking
-                             -- again: fewer, bigger AE jobs instead of a little one every check
+  craftMin      = 512,       -- wait until a row is this far below its keep (or a quarter of the keep, if less)
+                             -- before asking AE: fewer, bigger jobs instead of a little one every check
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
   flowCheck     = 5,         -- seconds between sends for smelt all / pulverize all
   trip          = 60,        -- seconds: a sent batch counts as still at the machines at least this long
@@ -745,13 +745,14 @@ local function step()
           -- when one AE1 job jams, every job stops; the one that stopped first is the likely cause
           if waiting and (not stuckNow or r.movedAt < stuckNow.at) then stuckNow = { name = displayName(e.name), at = r.movedAt } end
           local need = e.keep - have - queued
+          local minAsk = math.min(CFG.craftMin, math.ceil(e.keep / 4))
           if r.retryAt and now >= r.retryAt then r.retryAt, r.dropped = nil, nil end
           if r.retryAt then
             status[e.name] = (r.dropped and "AE dropped it 3 times (pattern?); again in " or "STUCK: no pattern? retry in ") .. math.ceil((r.retryAt - now) / 60) .. " min"
           elseif waiting then
             -- AE keeps the job and finishes it once the ingredients turn up; the tiers above go on
             status[e.name] = "AE waiting on ingredients (" .. commas(queued) .. " left)"
-          elseif need > 0 and (queued == 0 or need >= CFG.craftMin) and queued < CFG.craftAhead and not (craftTier and e.tier > craftTier) then
+          elseif need >= minAsk and queued < CFG.craftAhead and not (craftTier and e.tier > craftTier) then
             if holds then craftTier = craftTier or e.tier end
             -- chunks of CFG.craftBatch until CFG.craftAhead are queued (or the need is covered)
             local asked = 0
@@ -784,6 +785,8 @@ local function step()
           elseif queued > 0 then
             if holds then craftTier = craftTier or e.tier end
             status[e.name] = commas(queued) .. " left"
+          elseif need < minAsk then
+            status[e.name] = "ok"   -- a little under: not worth a new AE job yet
           elseif craftTier and e.tier > craftTier then
             status[e.name] = "waiting for tier " .. craftTier
           else
