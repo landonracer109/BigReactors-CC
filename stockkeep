@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.53"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.60"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -43,6 +43,13 @@ local CFG = {
   craftBatch    = 256,       -- most of one item asked for in one crafting request
   resetEvery    = 600,       -- seconds: at most this often, clear a stuck AE with the reset drive
   tierHold      = 0.5,       -- a craft row below this share of its target makes higher tiers wait
+  trendWindow   = 3600,      -- seconds of counts a Trends monitor works its per-hour rates from
+  trendMin      = 120,       -- ... and the least it needs before showing one
+  trendEvery    = 60,        -- seconds between the AE listings Trends monitors are counted from
+  -- what Trends monitors show: everything in AE whose name has one of these (any case)...
+  trendMatch    = { "ingot", "alloy" },
+  -- ...unless it also has one of these (casts, molds, machines named after alloys)
+  trendSkip     = { "cast", "pattern", "mold", "smelter", "furnace", "kiln", "block" },
   dropAlert     = 3,         -- this many items going from stock to 0 at once = AE storage offline
   dropHold      = 900,       -- seconds to wait for them before believing the zeros
   jobStall      = 300,       -- seconds an AE job may go without progress before it's flagged as stuck
@@ -369,6 +376,20 @@ do
     if type(t) == "table" then lastCounts = t end
   end
 end
+-- the last CFG.trendWindow seconds of counts per item (a sample per check), for Trends monitors
+local trend = {}
+local function addSample(name, t, n)
+  local s = trend[name] or {}
+  trend[name] = s
+  s[#s + 1] = { t = t, n = n }
+  while #s > 2 and t - s[2].t >= CFG.trendWindow do table.remove(s, 1) end
+end
+-- items per hour over what's been sampled (nil until there's CFG.trendMin seconds of it)
+local function rateOf(name)
+  local s = trend[name]
+  if not s or #s < 2 or s[#s].t - s[1].t < CFG.trendMin then return nil end
+  return (s[#s].n - s[1].n) / (s[#s].t - s[1].t) * 3600, s[#s].t - s[1].t
+end
 local function saveCounts()
   local h = fs.open(COUNTS_FILE, "w")
   if h then h.write(textutils.serialize(lastCounts)); h.close() end
@@ -571,6 +592,33 @@ end
 
 local function byTier(a, b) if a.tier ~= b.tier then return a.tier < b.tier end return a.name < b.name end
 
+-- name -> amount in AE, for the items Trends monitors show (from the last listing)
+local trendHave, lastTrendScan = {}, -math.huge
+local function trendWanted(shown)
+  local low = shown:lower()
+  for _, w in ipairs(CFG.trendSkip) do if low:find(w, 1, true) then return false end end
+  for _, w in ipairs(CFG.trendMatch) do if low:find(w, 1, true) then return true end end
+  return false
+end
+-- one AE listing a minute: total each matching item by the name it's shown as, and sample it
+local function scanTrends(now)
+  if now - lastTrendScan < CFG.trendEvery then return end
+  lastTrendScan = now
+  local all = try(ae, "getAvailableItems")
+  if type(all) ~= "table" then return end
+  local have = {}
+  for _, s in pairs(all) do
+    if type(s) == "table" and s.name and (tonumber(s.maxdmg) or 0) == 0 then
+      local shown = displayName(s.name)
+      if trendWanted(shown) then have[shown] = (have[shown] or 0) + (tonumber(s.qty) or 0) end
+    end
+  end
+  -- something that's run out drops off AE's listing: it reads 0 rather than vanishing
+  for shown in pairs(trendHave) do have[shown] = have[shown] or 0 end
+  trendHave = have
+  for shown, n in pairs(have) do addSample(shown, now, n) end
+end
+
 local function step()
   local now = os.clock()
   local jobs = aeJobs()   -- nil without a controller: crafts are then judged by the counts
@@ -603,6 +651,7 @@ local function step()
   end
   local holding = holdSince and now - holdSince < CFG.dropHold
   if not holding and now >= CFG.startDelay and nonzero > 0 then
+    scanTrends(now)
     -- trust these counts: remember them (also across restarts, when this matters most)
     local changed = false
     for _, e in ipairs(order) do
@@ -1111,7 +1160,14 @@ local function overBy(e)
 end
 
 local function monitorRows(mon)
-  if ui.pages["mode:" .. mon] ~= "needs" then return LIST end
+  local mode = ui.pages["mode:" .. mon]
+  if mode == "trends" then
+    local list = {}
+    for shown, n in pairs(trendHave) do list[#list + 1] = { name = shown, have = n } end
+    table.sort(list, function(a, b) return a.name < b.name end)
+    return list
+  end
+  if mode ~= "needs" then return LIST end
   local list, over = {}, {}
   for _, e in ipairs(LIST) do
     if not satisfied(e) then list[#list + 1] = e elseif overBy(e) then over[#over + 1] = e end
@@ -1201,14 +1257,16 @@ local function drawMonitor(m, name, place)
   ui.rows[name] = rows
   local list = monitorRows(name)
   local needsMode = ui.pages["mode:" .. name] == "needs"
+  local trendsMode = ui.pages["mode:" .. name] == "trends"
   local pages = math.max(1, math.ceil(#list / rows))
-  local page = math.max(1, math.min(ui.pages[name] or (needsMode and 1 or place), pages))
+  local page = math.max(1, math.min(ui.pages[name] or ((needsMode or trendsMode) and 1 or place), pages))
   ui.shown[name] = page
   button(m, 31, 1, " < ", colours.grey, "prev")
   m.setCursorPos(35, 1); m.setBackgroundColour(colours.blue); m.setTextColour(colours.white); m.write(page .. "/" .. pages)
   button(m, 40, 1, " > ", colours.grey, "next")
   -- All / Needs: this monitor lists everything, or only what isn't satisfied
-  button(m, 45, 1, needsMode and " Needs " or " All ", needsMode and colours.orange or colours.grey, "mode")
+  button(m, 45, 1, trendsMode and " Trends " or needsMode and " Needs " or " All ",
+         trendsMode and colours.cyan or needsMode and colours.orange or colours.grey, "mode")
   m.setBackgroundColour(colours.black)
   if aeStuck then   -- one stuck AE job stops all of AE's crafting: say so loudly
     band(m, 2, w, colours.red)
@@ -1219,6 +1277,39 @@ local function drawMonitor(m, name, place)
     m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(ui.message:sub(1, w - 2))
   end
   local nameW = math.max(10, w - 63)
+  if trendsMode then
+    -- Trends: what's in AE and how fast it's changing, from the last hour of counts
+    local cHave, cRate, cSpan = nameW + 2, nameW + 16, nameW + 32
+    band(m, 3, w, colours.grey)
+    m.setTextColour(colours.white)
+    m.setCursorPos(2, 3); m.write("ITEM"); m.setCursorPos(cHave, 3); m.write("HAVE")
+    m.setCursorPos(cRate, 3); m.write("PER HOUR"); m.setCursorPos(cSpan, 3); m.write("MEASURED OVER")
+    m.setBackgroundColour(colours.black)
+    if #list == 0 then
+      m.setCursorPos(2, 4); m.setTextColour(colours.grey); m.write("Counting ingots and alloys in AE...")
+    end
+    local first = (page - 1) * rows + 1
+    for i = first, math.min(#list, first + rows - 1) do
+      local e, y = list[i], 4 + i - first
+      m.setCursorPos(2, y); m.setTextColour(colours.white)
+      local shown = e.name
+      m.write(#shown > nameW and (shown:sub(1, nameW - 1) .. ".") or shown)
+      m.setCursorPos(cHave, y); m.setTextColour(colours.lightBlue)
+      m.write(e.have and compact(e.have) or "?")
+      local rate, span = rateOf(e.name)
+      m.setCursorPos(cRate, y)
+      if not rate then
+        m.setTextColour(colours.grey); m.write("measuring...")
+      else
+        local r = math.floor(rate + (rate >= 0 and 0.5 or -0.5))
+        m.setTextColour(r > 0 and colours.lime or r < 0 and colours.red or colours.lightGrey)
+        m.write((r > 0 and "+" or r < 0 and "-" or "") .. compact(math.abs(r)) .. "/h")
+        m.setCursorPos(cSpan, y); m.setTextColour(colours.grey)
+        m.write(math.floor(span / 60 + 0.5) .. " min")
+      end
+    end
+    return
+  end
   local cKeep, cHow, cTier, cBtn, cSt = nameW + 2, nameW + 16, nameW + 32, nameW + 36, nameW + 50
   -- column headings on a grey band
   band(m, 3, w, colours.grey)
@@ -1351,7 +1442,8 @@ local function touch(mon, x, y)
       elseif hit.action == "name" then
         ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from) .. ((e.per or 1) > 1 and (", " .. e.per .. " each") or "")) or "")
       elseif hit.action == "mode" then
-        ui.pages["mode:" .. mon] = ui.pages["mode:" .. mon] ~= "needs" and "needs" or nil
+        local cur = ui.pages["mode:" .. mon]
+        ui.pages["mode:" .. mon] = (cur == nil and "needs") or (cur == "needs" and "trends") or nil
         ui.pages[mon] = 1; savePages()
       elseif hit.action == "prev" or hit.action == "next" then
         local pages = math.max(1, math.ceil(#monitorRows(mon) / (ui.rows[mon] or 1)))
