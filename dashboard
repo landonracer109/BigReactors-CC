@@ -655,6 +655,35 @@ local function turbineShare(role, list)
   return part
 end
 
+-- Picks the text size by working out what fits instead of trying sizes on the monitor: every
+-- setTextScale rebuilds the monitor's screen on the computer thread, and ComputerCraft 1.63 can
+-- crash the server if the main thread sends that screen to a nearby player mid-rebuild. So the
+-- size is set once (plus once at the start, to learn how many blocks the monitor is), and only
+-- again when it really changes. `mon` is the monitor's table (p = the peripheral), which keeps
+-- the size last set; fits(w, h) says whether w x h characters are enough.
+local function charsAt(blocks, scale, pixels)   -- CC 1.63's own sizing (TileMonitor)
+  return math.max(math.floor((blocks - 0.3125) / (scale * pixels * 0.015625) + 0.5), 1)
+end
+local function fitTextScale(mon, fits, fixed)
+  local p = mon.p
+  local w, h, bw, bh
+  for _ = 1, 2 do
+    if not mon.scale then p.setTextScale(1); mon.scale = 1 end
+    w, h = p.getSize()
+    bw = math.floor(w * mon.scale * 6 * 0.015625 + 0.3125 + 0.5)
+    bh = math.floor(h * mon.scale * 9 * 0.015625 + 0.3125 + 0.5)
+    -- (a monitor swapped or rebuilt meanwhile has some other size: learn it again)
+    if charsAt(bw, mon.scale, 6) == w and charsAt(bh, mon.scale, 9) == h then break end
+    mon.scale = nil
+  end
+  local scale = fixed
+  if not scale then
+    scale = 5
+    while scale > 0.5 and not fits(charsAt(bw, scale, 6), charsAt(bh, scale, 9)) do scale = scale - 0.5 end
+  end
+  if mon.scale ~= scale then p.setTextScale(scale); mon.scale = scale end
+end
+
 local function drawWall(role, list)
   local wall = walls[role]
   if not wall then return end
@@ -664,13 +693,7 @@ local function drawWall(role, list)
     local key = fitKey(role, list)
     local w, h = p.getSize()
     if not wall.canvas or wall.canvas.w ~= w or wall.canvas.h ~= h or wall.key ~= key then
-      local scale = 5
-      while true do
-        p.setTextScale(scale)
-        local tw, th = p.getSize()
-        if scale <= 0.5 or FITS[role](tw, th, list) then break end
-        scale = scale - 0.5
-      end
+      fitTextScale(wall, function(tw, th) return FITS[role](tw, th, list) end)
       w, h = p.getSize()
       wall.canvas = newCanvas(w, h, p.isColour and p.isColour() or false)
       wall.key = key
