@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.51"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.52"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -43,6 +43,8 @@ local CFG = {
   craftBatch    = 256,       -- most of one item asked for in one crafting request
   resetEvery    = 600,       -- seconds: at most this often, clear a stuck AE with the reset drive
   tierHold      = 0.5,       -- a craft row below this share of its target makes higher tiers wait
+  dropAlert     = 3,         -- this many items going from stock to 0 at once = AE storage offline
+  dropHold      = 900,       -- seconds to wait for them before believing the zeros
   jobStall      = 300,       -- seconds an AE job may go without progress before it's flagged as stuck
   fuzzyBatch    = 256,       -- most damageable items trashed per look
   fuzzyEvery    = 60,        -- seconds between full looks for damaged copies of a trash all item
@@ -354,6 +356,23 @@ do   -- carry on from the previous run's lines
 end
 local aeStuck = nil   -- name of an item whose AE job stopped moving (AE1 then crafts nothing else)
 local loggedStuck, loggedWhy = nil, nil   -- (so each change is logged once)
+
+-- the last counts that looked right, by item (kept in stockkeep.counts across restarts)
+local COUNTS_FILE = "stockkeep.counts"
+local lastCounts = {}
+local holdSince, aeHold = nil, false
+do
+  local h = fs.open(COUNTS_FILE, "r")
+  if h then
+    local t = textutils.unserialize(h.readAll() or "")
+    h.close()
+    if type(t) == "table" then lastCounts = t end
+  end
+end
+local function saveCounts()
+  local h = fs.open(COUNTS_FILE, "w")
+  if h then h.write(textutils.serialize(lastCounts)); h.close() end
+end
 local lastReset, resets = -math.huge, 0
 local resetNote = nil   -- what the last reset did, for the banner
 local lastResetItem = nil
@@ -505,7 +524,7 @@ end
 -- smelt all / pulverize all: input-driven, like an export bus. Everything above the reserve
 -- (keep) goes to the machine chest, a stack per call until the chest is full; run often.
 local function flow()
-  if os.clock() < CFG.startDelay then return end   -- AE may still be loading (see step)
+  if os.clock() < CFG.startDelay or aeHold then return end   -- AE may still be loading (see step)
   local rows = {}   -- a copy: the screen task can change the list while this waits on AE
   for i, e in ipairs(LIST) do rows[i] = e end
   for _, e in ipairs(rows) do
@@ -569,11 +588,36 @@ local function step()
     counts[e] = count(e.name)
     if (counts[e] or 0) > 0 then nonzero = nonzero + 1 end
   end
-  if now < CFG.startDelay or (nonzero == 0 and #order >= 3) then
-    local why = now < CFG.startDelay and ("starting up (" .. math.ceil(CFG.startDelay - now) .. " s)") or "AE reads empty: waiting"
+  -- Part of AE's storage can also take minutes to come back after a crash: items that had stock
+  -- read 0 all at once while the rest look normal. Normal use never empties several items in one
+  -- check, so CFG.dropAlert or more of them going from stock to 0 together holds everything until
+  -- they're back (or CFG.dropHold seconds, in case a drive really was taken out).
+  local dropped = 0
+  for _, e in ipairs(order) do
+    if (lastCounts[e.name] or 0) >= 64 and counts[e] == 0 then dropped = dropped + 1 end
+  end
+  if dropped >= CFG.dropAlert then
+    holdSince = holdSince or now
+  else
+    holdSince = nil
+  end
+  local holding = holdSince and now - holdSince < CFG.dropHold
+  if not holding and now >= CFG.startDelay and nonzero > 0 then
+    -- trust these counts: remember them (also across restarts, when this matters most)
+    local changed = false
+    for _, e in ipairs(order) do
+      if counts[e] and counts[e] ~= lastCounts[e.name] then lastCounts[e.name] = counts[e]; changed = true end
+    end
+    if changed then saveCounts() end
+  end
+  aeHold = holding and true or false
+  if now < CFG.startDelay or (nonzero == 0 and #order >= 3) or holding then
+    local why = now < CFG.startDelay and ("starting up (" .. math.ceil(CFG.startDelay - now) .. " s)")
+      or holding and ("AE storage partly offline? " .. dropped .. " items read 0: waiting")
+      or "AE reads empty: waiting"
     for _, e in ipairs(order) do status[e.name] = why end
     lastWork = why
-    if why:find("empty") and loggedWhy ~= why then logEvent(why) end
+    if (why:find("empty") or why:find("offline")) and loggedWhy ~= why then logEvent(why) end
     loggedWhy = why
     return false
   end
