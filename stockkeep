@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.63"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.64"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -48,6 +48,8 @@ local CFG = {
   trendEvery    = 60,        -- seconds between the AE listings Trends monitors are counted from
   -- what Trends monitors show: everything in AE whose name has one of these (any case)...
   trendMatch    = { "ingot", "alloy" },
+  -- ...plus these exact items (not their dusts, ores or blocks)
+  trendAlso     = { "Certus Quartz", "Nether Quartz" },
   -- ...unless it also has one of these (casts, molds, alloy blends, machines named after alloys)
   trendSkip     = { "cast", "pattern", "mold", "smelter", "furnace", "kiln", "block", "blend",
                    "meteoric", "desh" },   -- (Galacticraft's own ingots)
@@ -597,6 +599,7 @@ local function byTier(a, b) if a.tier ~= b.tier then return a.tier < b.tier end 
 local trendHave, lastTrendScan = {}, -math.huge
 local function trendWanted(shown)
   local low = shown:lower()
+  for _, w in ipairs(CFG.trendAlso) do if low == w:lower() then return true end end
   for _, w in ipairs(CFG.trendSkip) do if low:find(w, 1, true) then return false end end
   for _, w in ipairs(CFG.trendMatch) do if low:find(w, 1, true) then return true end end
   return false
@@ -1275,7 +1278,7 @@ local function drawMonitor(m, name, place)
     m.write(("AE STUCK on " .. aeStuck .. ": " .. (resetDrive and (resetNote or "resetting AE with the reset drive") or "shift-click it in the ME Crafting Monitor")):sub(1, w - 2))
     m.setBackgroundColour(colours.black)
   else
-    local note = trendsMode and "Ingots and alloys in AE, and how fast each is changing over the last hour." or ui.message
+    local note = trendsMode and "Ingots, alloys and quartz in AE, and how fast each is changing over the last hour." or ui.message
     m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(note:sub(1, w - 2))
   end
   local nameW = math.max(10, w - 63)
@@ -1289,7 +1292,7 @@ local function drawMonitor(m, name, place)
     m.setCursorPos(cRate, 3); m.write("PER HOUR"); m.setCursorPos(cSpan, 3); m.write("MEASURED OVER")
     m.setBackgroundColour(colours.black)
     if #list == 0 then
-      m.setCursorPos(2, 4); m.setTextColour(colours.grey); m.write("Counting ingots and alloys in AE...")
+      m.setCursorPos(2, 4); m.setTextColour(colours.grey); m.write("Counting ingots, alloys and quartz in AE...")
     end
     local first = (page - 1) * rows + 1
     for i = first, math.min(#list, first + rows - 1) do
