@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.50"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.51"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -57,6 +57,9 @@ local CFG = {
   startDelay    = 60,        -- seconds after start before anything is crafted or sent (AE loading)
   settle        = 20,        -- seconds after the last tap before the list re-sorts and an edited row starts sending
   dropWait      = 300,       -- seconds to wait after AE dropped a craft three times running
+  reportURL     = "https://brlink.tailbdc4d5.ts.net",   -- the brlink relay ("" = don't report)
+  reportEvery   = 30,        -- seconds between reports to the relay
+  logKeep       = 300,       -- lines kept in stockkeep.log
   rescan        = 600,       -- seconds between looking up item names in AE
   addChest      = "top",     -- side of this computer with the chest used to add items
 }
@@ -323,7 +326,34 @@ local sent = {}       -- name -> what is out: craft requests, or input at the ma
 local lowSince = {}   -- name -> os.clock() when it first went below target
 local status = {}     -- name -> text
 local lastWork = ""
+
+---------------------------------------------------------------------------------------------------
+-- the log: what stockkeep did that matters later (crafts asked for, AE stuck and reset, errors,
+-- edits on the monitor, AE coming and going). Kept in stockkeep.log on this computer and sent
+-- with each report to the brlink relay, so it can be read from outside the game.
+
+local LOG_FILE = "stockkeep.log"
+local logLines = {}      -- the newest CFG.logKeep lines, as written to the file
+local unsent = {}        -- events not yet delivered to the relay
+local function logEvent(text)
+  local stamp = "day " .. os.day() .. " " .. textutils.formatTime(os.time(), true)
+  local up = math.floor(os.clock())
+  logLines[#logLines + 1] = stamp .. "  +" .. up .. "s  " .. text
+  while #logLines > CFG.logKeep do table.remove(logLines, 1) end
+  if #unsent < 200 then unsent[#unsent + 1] = { up = up, t = text } end
+  local h = fs.open(LOG_FILE, "w")
+  if h then h.write(table.concat(logLines, "\n") .. "\n"); h.close() end
+end
+do   -- carry on from the previous run's lines
+  local h = fs.open(LOG_FILE, "r")
+  if h then
+    for line in (h.readAll() or ""):gmatch("[^\n]+") do logLines[#logLines + 1] = line end
+    h.close()
+    while #logLines > CFG.logKeep do table.remove(logLines, 1) end
+  end
+end
 local aeStuck = nil   -- name of an item whose AE job stopped moving (AE1 then crafts nothing else)
+local loggedStuck, loggedWhy = nil, nil   -- (so each change is logged once)
 local lastReset, resets = -math.huge, 0
 local resetNote = nil   -- what the last reset did, for the banner
 local lastResetItem = nil
@@ -543,6 +573,8 @@ local function step()
     local why = now < CFG.startDelay and ("starting up (" .. math.ceil(CFG.startDelay - now) .. " s)") or "AE reads empty: waiting"
     for _, e in ipairs(order) do status[e.name] = why end
     lastWork = why
+    if why:find("empty") and loggedWhy ~= why then logEvent(why) end
+    loggedWhy = why
     return false
   end
   local stuckNow = nil   -- a job AE has stopped working on (it holds up all of AE's crafting)
@@ -610,12 +642,14 @@ local function step()
               r.lastQ, r.movedAt = after[key], now
               status[e.name] = commas(after[key]) .. " left"
               lastWork = "asked AE for " .. commas(asked) .. " " .. displayName(e.name)
+              logEvent(lastWork)
             else
               -- not taken on (no pattern?): try again next check; three times in a row, wait a bit
               vanished[e.name] = (vanished[e.name] or 0) + 1
               if vanished[e.name] >= 3 then
                 vanished[e.name] = 0
                 r.retryAt, r.dropped = now + CFG.dropWait, true
+                logEvent("AE didn't take requests for " .. displayName(e.name) .. " 3 times (pattern?): waiting " .. CFG.dropWait .. " s")
               end
               status[e.name] = "AE didn't take it (pattern?)"
               craftTier = queued > 0 and craftTier or nil
@@ -696,6 +730,7 @@ local function step()
               end
               status[e.name] = "crafting " .. commas(n)
               lastWork = "asked AE for " .. commas(n) .. " " .. displayName(e.name)
+              logEvent(lastWork)
             else
               sent[e.name] = { amount = n, since = now, startCount = have, retryAt = now + CFG.backoff }
               status[e.name] = "craft request failed (no pattern?)"
@@ -712,6 +747,10 @@ local function step()
     end
   end
   aeStuck = stuckNow and stuckNow.name
+  if aeStuck ~= loggedStuck then
+    logEvent(aeStuck and ("AE stuck on " .. aeStuck .. " (no progress for " .. CFG.jobStall .. " s)") or ("AE moving again" .. (loggedStuck and (" (was stuck on " .. loggedStuck .. ")") or "")))
+    loggedStuck = aeStuck
+  end
   -- clear the jam ourselves when there's a reset drive (at most once per CFG.resetEvery)
   if aeStuck and now - lastReset >= CFG.resetEvery then
     lastReset = now
@@ -719,6 +758,7 @@ local function step()
     if ok then
       resets = resets + 1
       lastWork = "AE was stuck on " .. aeStuck .. ": reset it (" .. resets .. " so far)"
+      logEvent(lastWork)
       if lastResetItem == aeStuck then
         resetNote = "still stuck after a reset: are its ingredients in AE? (reset " .. resets .. "x)"
       else
@@ -727,6 +767,7 @@ local function step()
       lastResetItem = aeStuck
     else
       lastWork = "AE stuck on " .. aeStuck .. ", can't reset: " .. why
+      logEvent(lastWork)
       resetNote = "can't reset (" .. why .. ")"
     end
   end
@@ -1301,6 +1342,9 @@ local function touch(mon, x, y)
           ui.confirm, ui.confirmAt = e, os.clock()
         end
       end
+      if not browsing then
+        logEvent("edit: " .. hit.action .. (e and (" " .. displayName(e.name) .. " -> keep " .. e.keep .. ", " .. methodLabel(e) .. ", T" .. e.tier) or "") .. (hit.action == "add" and (" (" .. ui.message .. ")") or ""))
+      end
       return true
     end
   end
@@ -1330,9 +1374,83 @@ scanIds()
 
 -- the work: a heartbeat timer, started again only after the work is done, so it can't fire
 -- (and be lost) during this task's own AE calls
+-- Reports to the brlink relay (like the reactor controllers): what's short, AE's state and the new
+-- log lines, so they can be read from outside the game. Needs a brlink.key file. The answer is
+-- only checked for "ok"; stockkeep never takes "update all" from the relay.
+local link = { state = "off", pending = nil, since = 0, sending = 0 }
+local function readKey()
+  local h = fs.open("brlink.key", "r")
+  if not h then return nil end
+  local k = (h.readAll() or ""):gsub("%s", "")
+  h.close()
+  return k ~= "" and k or nil
+end
+local function ser(v)
+  local kind = type(v)
+  if kind == "number" then
+    if v ~= v or v == math.huge or v == -math.huge then return "nil" end
+    return tostring(math.floor(v * 1000 + 0.5) / 1000)
+  elseif kind == "string" then
+    return string.format("%q", v)
+  elseif kind == "boolean" then
+    return tostring(v)
+  elseif kind == "table" then
+    local parts = {}
+    if #v > 0 then
+      for _, x in ipairs(v) do parts[#parts + 1] = ser(x) end
+    else
+      for k, x in pairs(v) do parts[#parts + 1] = k .. "=" .. ser(x) end
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+  end
+  return "nil"
+end
+local function report()
+  if CFG.reportURL == "" or not http then link.state = "off"; return end
+  local now = os.clock()
+  if link.pending then
+    if now - link.since < 30 then return end
+    link.pending, link.state = nil, "no answer from the relay"
+  end
+  local key = readKey()
+  if not key then link.state = "off (no brlink.key file)"; return end
+  local short, ok = {}, 0
+  for _, e in ipairs(LIST) do
+    if satisfied(e) then ok = ok + 1
+    elseif #short < 40 then short[#short + 1] = { n = displayName(e.name), h = e.have, k = e.keep, how = e.how, s = status[e.name] } end
+  end
+  link.sending = math.min(#unsent, 50)
+  local events = {}
+  for i = 1, link.sending do events[i] = unsent[i] end
+  local body = ser({ v = VERSION, up = math.floor(now), day = os.day(), time = os.time(), stocked = ok, total = #LIST,
+                     stuck = aeStuck, resets = resets, controller = controller and true or false,
+                     resetDrive = resetDrive and true or false, lastWork = lastWork, short = short, events = events })
+  local url = CFG.reportURL .. "/report/stockkeep"
+  if pcall(http.request, url, key .. "\n" .. body) then
+    link.pending, link.since = url, now
+  else
+    link.state = "this computer can't use http"
+  end
+end
+local function noteLink()
+  if link.state ~= link.logged then link.logged = link.state; logEvent("relay: " .. link.state) end
+end
+local function reportAnswer(event, url, handle)
+  if url ~= link.pending then return end
+  link.pending = nil
+  if handle then pcall(handle.close) end
+  if event == "http_success" then
+    for _ = 1, link.sending do table.remove(unsent, 1) end   -- delivered
+    link.state = "ok"
+  else
+    link.state = "refused (wrong key?) or the relay is down"
+  end
+end
+
 local function work()
   local lastScan = os.clock()
   local lastStep, lastFlow = -math.huge, -math.huge
+  local lastReport = -math.huge
   while true do
     if not ae then findAE() end
     local redraw = not ae
@@ -1344,16 +1462,19 @@ local function work()
         if now - lastScan >= CFG.rescan then pcall(scanIds); lastScan = now end
         local ok, err = pcall(step)
         if not ok then lastWork = "error: " .. tostring(err) end
+        if not ok then logEvent(lastWork) end
         lastStep = os.clock()
         lastFlow = -math.huge   -- send right after a check, so the counts are fresh
       end
       if os.clock() - lastFlow >= CFG.flowCheck then
         local ok, err = pcall(flow)
         if not ok then lastWork = "error: " .. tostring(err) end
+        if not ok then logEvent(lastWork) end
         lastFlow = os.clock()
       end
       if lastWork ~= before then redraw = true end
     end
+    if os.clock() - lastReport >= CFG.reportEvery then lastReport = os.clock(); pcall(report); noteLink() end
     if settleList() then redraw = true end
     if redraw then drawAll() end
     local timer = os.startTimer(1)
@@ -1368,15 +1489,23 @@ local function screen()
     if event == "monitor_touch" then
       local ok, changed = pcall(touch, p1, p2, p3)
       if not ok then lastWork = "error: " .. tostring(changed) end
+      if not ok then logEvent(lastWork) end
       if not ok or changed then drawAll() end
     elseif event == "peripheral" or event == "peripheral_detach" then
+      local before = tostring(aeName) .. "/" .. tostring(controller ~= nil) .. "/" .. tostring(resetDriveName)
       findAE()
+      local after = tostring(aeName) .. "/" .. tostring(controller ~= nil) .. "/" .. tostring(resetDriveName)
+      if after ~= before then logEvent("peripherals: AE " .. tostring(aeName) .. ", controller " .. tostring(controller ~= nil) .. ", reset drive " .. tostring(resetDriveName)) end
+    elseif event == "http_success" or event == "http_failure" then
+      reportAnswer(event, p1, p2); noteLink()
     elseif (event == "key" and p1 == keys.q) or event == "terminate" then
+      logEvent("stopped (" .. event .. ")")
       return
     end
   end
 end
 
+logEvent("started " .. VERSION .. ": AE " .. tostring(aeName) .. ", controller " .. tostring(controller ~= nil) .. ", reset drive " .. tostring(resetDriveName) .. ", " .. #LIST .. " rows")
 drawAll()
 parallel.waitForAny(work, screen)
 for _, e in ipairs(LIST) do if e.how == "redstone" then rs.setOutput(e.side, false) end end
