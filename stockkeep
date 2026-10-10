@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.62"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.63"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -49,7 +49,8 @@ local CFG = {
   -- what Trends monitors show: everything in AE whose name has one of these (any case)...
   trendMatch    = { "ingot", "alloy" },
   -- ...unless it also has one of these (casts, molds, alloy blends, machines named after alloys)
-  trendSkip     = { "cast", "pattern", "mold", "smelter", "furnace", "kiln", "block", "blend" },
+  trendSkip     = { "cast", "pattern", "mold", "smelter", "furnace", "kiln", "block", "blend",
+                   "meteoric", "desh" },   -- (Galacticraft's own ingots)
   dropAlert     = 3,         -- this many items going from stock to 0 at once = AE storage offline
   dropHold      = 900,       -- seconds to wait for them before believing the zeros
   jobStall      = 300,       -- seconds an AE job may go without progress before it's flagged as stuck
