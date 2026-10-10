@@ -34,14 +34,14 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.64"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.65"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
   smeltChest    = "up",      -- side of the ME block the smelting Ender Chest is on
   pulverizeChest = "down",   -- side of the ME block the pulverizing Ender Chest is on
   craftBatch    = 256,       -- most of one item asked for in one crafting request
-  resetEvery    = 600,       -- seconds: at most this often, clear a stuck AE with the reset drive
+  resetEvery    = 300,       -- seconds: at most this often, clear a stuck AE with the reset drive
   tierHold      = 0.5,       -- a craft row below this share of its target makes higher tiers wait
   trendWindow   = 3600,      -- seconds of counts a Trends monitor works its per-hour rates from
   trendMin      = 120,       -- ... and the least it needs before showing one
@@ -55,7 +55,7 @@ local CFG = {
                    "meteoric", "desh" },   -- (Galacticraft's own ingots)
   dropAlert     = 3,         -- this many items going from stock to 0 at once = AE storage offline
   dropHold      = 900,       -- seconds to wait for them before believing the zeros
-  jobStall      = 300,       -- seconds an AE job may go without progress before it's flagged as stuck
+  jobStall      = 120,       -- seconds an AE job may go without progress before it's flagged as stuck
   fuzzyBatch    = 256,       -- most damageable items trashed per look
   fuzzyEvery    = 60,        -- seconds between full looks for damaged copies of a trash all item
   overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
