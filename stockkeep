@@ -7,6 +7,8 @@
 --   pulverize  send its input to your pulverizing Ender Chest
 --   redstone   turn a redstone output on while it's low (replaces a level emitter, e.g. for
 --              Induction Smelters fed by export buses)
+--   trash all  everything above the amount into a trash can (see stockkeep.trash); damageable
+--              items (bows, armour) in every damage state, like a fuzzy export bus
 --   watch      just show it (and how long it's been low)
 -- It works up the tiers: lower tiers are refilled first, so the things above them find their
 -- parts in stock and craft at full speed instead of one at a time.
@@ -32,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.43"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.50"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -42,6 +44,8 @@ local CFG = {
   resetEvery    = 600,       -- seconds: at most this often, clear a stuck AE with the reset drive
   tierHold      = 0.5,       -- a craft row below this share of its target makes higher tiers wait
   jobStall      = 300,       -- seconds an AE job may go without progress before it's flagged as stuck
+  fuzzyBatch    = 256,       -- most damageable items trashed per look
+  fuzzyEvery    = 60,        -- seconds between full looks for damaged copies of a trash all item
   overAlert     = 1000,      -- a Needs monitor also lists rows this far over their target
   craftAhead    = 1024,      -- with a controller: keep asking (a chunk per check) while AE has fewer than this queued
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
@@ -283,8 +287,8 @@ local function scanIds()
       -- otherwise the one there's most of (100k glass, not 65 chiseled glass)
       for _, s in ipairs(matches) do if not pick or (tonumber(s.qty) or 0) > (tonumber(pick.qty) or 0) then pick = s end end
     end
-    if pick and (not known or known.id ~= pick.id or known.dmg ~= pick.dmg or known.max ~= pick.maxSize) then
-      ids[key] = { id = pick.id, dmg = pick.dmg, max = pick.maxSize, chosen = known and known.chosen }
+    if pick and (not known or known.id ~= pick.id or known.dmg ~= pick.dmg or known.max ~= pick.maxSize or known.maxdmg ~= pick.maxdmg) then
+      ids[key] = { id = pick.id, dmg = pick.dmg, max = pick.maxSize, maxdmg = pick.maxdmg, chosen = known and known.chosen }
       changed = true
     end
   end
@@ -405,6 +409,69 @@ local function process(e, have, short, now)
   return "processing " .. commas(math.ceil((inFlight + moved) * e.per))
 end
 
+-- smelt all / pulverize all / trash all: everything above the reserve (keep) goes out
+local function isAllMethod(how) return how == "smelt all" or how == "pulverize all" or how == "trash all" end
+
+-- trash all: like the others, but into a trash can (Extra Utilities' Trash Can) touching the ME
+-- block, on the side named in the file stockkeep.trash (north, south, east or west). Items that
+-- take damage (bows, swords, armour) go in every damage state, like a fuzzy export bus.
+local TRASH_FILE = "stockkeep.trash"
+local trashSide = nil
+local function loadTrashSide()
+  local h = fs.open(TRASH_FILE, "r")
+  if not h then return end
+  local s = (h.readAll() or ""):lower():match("%a+")
+  h.close()
+  if s == "north" or s == "south" or s == "east" or s == "west" or s == "up" or s == "down" then trashSide = s end
+end
+local lastFuzzy = {}   -- name -> os.clock() of the last full look for its damaged copies
+
+local function trashRow(e)
+  if not trashSide then
+    status[e.name] = "set the trash side: edit " .. TRASH_FILE
+    return
+  end
+  local i = ids[e.name]
+  local moved, have = 0, count(e.name) or 0
+  if (tonumber(i.maxdmg) or 0) > 0 then
+    -- damageable: every copy whatever its damage counts, and goes (a full listing, so not every
+    -- few seconds)
+    if os.clock() - (lastFuzzy[e.name] or -math.huge) < CFG.fuzzyEvery then return end
+    lastFuzzy[e.name] = os.clock()
+    local all = try(ae, "getAvailableItems")
+    local copies, total = {}, 0
+    for _, s in pairs(type(all) == "table" and all or {}) do
+      if type(s) == "table" and s.id == i.id then
+        copies[#copies + 1] = s
+        total = total + (tonumber(s.qty) or 0)
+      end
+    end
+    local extra = math.min(total - e.keep, CFG.fuzzyBatch)   -- (one call per item: these rarely stack)
+    for _, s in ipairs(copies) do
+      if extra <= 0 then break end
+      local n = sendTo({ id = s.id, dmg = s.dmg, max = s.maxSize }, math.min(extra, tonumber(s.qty) or 0), trashSide)
+      moved, extra = moved + n, extra - n
+    end
+    have = total - moved
+  else
+    local extra = have - e.keep
+    if extra > 0 then moved = sendTo(i, math.min(extra, CFG.sendBatch), trashSide) end
+    have = have - moved
+    if extra > 0 and moved == 0 then
+      status[e.name] = "can't reach the trash (" .. trashSide .. " of the ME block)"
+      e.have = have
+      return
+    end
+  end
+  if moved > 0 then
+    sentTotal[e.name] = (sentTotal[e.name] or 0) + moved
+    lastWork = "trashed " .. commas(moved) .. " " .. displayName(e.name)
+  end
+  -- ("sent ..." counts as satisfied, like the other all-methods)
+  status[e.name] = (sentTotal[e.name] or 0) > 0 and ("sent " .. commas(sentTotal[e.name]) .. " to trash") or "ok"
+  e.have = have
+end
+
 -- smelt all / pulverize all: input-driven, like an export bus. Everything above the reserve
 -- (keep) goes to the machine chest, a stack per call until the chest is full; run often.
 local function flow()
@@ -413,9 +480,12 @@ local function flow()
   for i, e in ipairs(LIST) do rows[i] = e end
   for _, e in ipairs(rows) do
     local editing = e.editedAt and os.clock() - e.editedAt < CFG.settle
-    if editing and (e.how == "smelt all" or e.how == "pulverize all" or e.how == "smelt" or e.how == "pulverize") then
+    if editing and (isAllMethod(e.how) or e.how == "smelt" or e.how == "pulverize") then
       -- just added or changed: nothing goes out until the taps are done
       status[e.name] = "starts in " .. math.ceil(CFG.settle - (os.clock() - e.editedAt)) .. " s"
+    elseif e.how == "trash all" and ids[e.name] then
+      local ok, err = pcall(trashRow, e)
+      if not ok then status[e.name] = "error: " .. tostring(err) end
     elseif (e.how == "smelt all" or e.how == "pulverize all") and ids[e.name] then
       local have = count(e.name) or 0
       local extra = have - e.keep
@@ -484,7 +554,7 @@ local function step()
     else
       local short = e.keep - have
       if short > 0 then lowSince[e.name] = lowSince[e.name] or now else lowSince[e.name] = nil end
-      if e.how == "smelt all" or e.how == "pulverize all" then
+      if isAllMethod(e.how) then
         have = e.have or have   -- flow() sends these every CFG.flowCheck seconds and keeps the count
       elseif e.how == "redstone" then
         rs.setOutput(e.side, short > 0)
@@ -908,14 +978,14 @@ end
 -- the monitor: the whole list, edited by touch
 
 local LADDER = { 0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 100000, 250000, 500000, 1000000 }
-local METHODS = { "craft", "smelt", "pulverize", "smelt all", "pulverize all", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
+local METHODS = { "craft", "smelt", "pulverize", "smelt all", "pulverize all", "trash all", "watch", "rs:left", "rs:right", "rs:front", "rs:back", "rs:top", "rs:bottom" }
 local ui = { hits = {}, message = "Tap - / + to change amounts, the method or tier to cycle them.", confirm = nil, confirmAt = 0,
              editedAt = -math.huge }
 local SETTLE = CFG.settle
 
 -- The screen groups rows by method, A-Z by name inside each group. (The checks work through
 -- the list by tier; this order is only for finding things.)
-local METHOD_ORDER = { pulverize = 1, ["pulverize all"] = 2, smelt = 3, ["smelt all"] = 4, craft = 5, redstone = 6, watch = 7 }
+local METHOD_ORDER = { pulverize = 1, ["pulverize all"] = 2, smelt = 3, ["smelt all"] = 4, craft = 5, ["trash all"] = 6, redstone = 7, watch = 8 }
 local function byMethod(a, b)
   local ma, mb = METHOD_ORDER[a.how] or 8, METHOD_ORDER[b.how] or 8
   if ma ~= mb then return ma < mb end
@@ -1144,7 +1214,7 @@ local function addFromChest()
   local per = hasInput and math.max(1, math.floor((tonumber(item.qty) or 1) / math.max(1, tonumber(input.qty) or 1))) or 1
   local perText = per > 1 and (", " .. per .. " from each") or ""
   local listed = byName[item.name] and item.name or (byName[displayName(item.name)] and displayName(item.name))
-  ids[listed or item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize, chosen = true }
+  ids[listed or item.name] = { id = item.id, dmg = item.dmg, max = item.maxSize, maxdmg = item.maxdmg, chosen = true }
   if hasInput then ids[input.name] = { id = input.id, dmg = input.dmg, max = input.maxSize, chosen = true } end
   if listed then
     -- already listed: point that row at this exact item (to pick one of several with the same
@@ -1206,9 +1276,9 @@ local function touch(mon, x, y)
         local nextIdx = 1
         for i, mth in ipairs(METHODS) do if mth == cur then nextIdx = i % #METHODS + 1 end end
         local mth = METHODS[nextIdx]
-        local wasAll = e.how == "smelt all" or e.how == "pulverize all"
+        local wasAll = isAllMethod(e.how)
         if mth:sub(1, 3) == "rs:" then e.how, e.side = "redstone", mth:sub(4) else e.how, e.side = mth, nil end
-        local isAll = e.how == "smelt all" or e.how == "pulverize all"
+        local isAll = isAllMethod(e.how)
         -- for smelt all / pulverize all the number is a reserve, almost always 0; the old amount
         -- comes back when tapping on to a method with a target
         if isAll and not wasAll then e.keepBefore, e.keep = e.keep, 0
@@ -1243,6 +1313,7 @@ end
 loadIds()
 loadList()
 loadPages()
+loadTrashSide()
 reindex()
 findAE()
 if not ae then
