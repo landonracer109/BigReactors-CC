@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.82"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.83"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -64,8 +64,8 @@ local CFG = {
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
   flowCheck     = 5,         -- seconds between sends for smelt all / pulverize all
   trip          = 60,        -- seconds: a sent batch counts as still at the machines at least this long
-  quiet         = 120,       -- ... and after that until nothing has arrived for this many seconds (long:
-                             -- rows share the machines, so one item can sit queued behind another a while)
+  quiet         = 300,       -- ... and after that until nothing has arrived for this many seconds (long:
+                             -- rows share the chest, so one item can sit behind another for minutes)
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
   startDelay    = 60,        -- seconds after start before anything is crafted or sent (AE loading)
@@ -437,11 +437,13 @@ local function process(e, have, short, now)
   -- limit (nothing goes in while it's full); on top of that, only what the target still needs
   -- beyond what is already at the machines is sent. Runs every CFG.flowCheck seconds.
   local s = sent[e.name]
-  if not s then s = { out = 0, lastHave = have, unanswered = 0 }; sent[e.name] = s end
-  -- any rise means the machines are delivering (the total may never rise by a whole batch when
-  -- something else uses the item meanwhile, like crafting assemblies pulling the dust)
-  if have > s.lastHave then s.waitingSince, s.unanswered, s.lastRise = nil, 0, now end
-  s.lastHave = have
+  if not s then s = { out = 0, lastHave = have, lastPassed = passedOn[e.name] or 0, unanswered = 0, rises = 0 }; sent[e.name] = s end
+  -- any rise means the machines are delivering. What came back is the sum of the rises (with what
+  -- this program passed on to the next machine added back), not the change in the total, which
+  -- crafting can pull down meanwhile (assemblies taking the dust) so a batch never looks done.
+  local rise = have - s.lastHave + (passedOn[e.name] or 0) - (s.lastPassed or 0)
+  if rise > 0 then s.waitingSince, s.unanswered, s.lastRise, s.rises = nil, 0, now, (s.rises or 0) + rise end
+  s.lastHave, s.lastPassed = have, passedOn[e.name] or 0
   if s.retryAt then
     if now < s.retryAt then
       return "STUCK: " .. displayName(e.from) .. " never came back; retry in " .. math.ceil((s.retryAt - now) / 60) .. " min"
@@ -453,14 +455,12 @@ local function process(e, have, short, now)
     return "STUCK: " .. commas(s.unanswered) .. " " .. displayName(e.from) .. ", none back in " .. math.floor((now - s.waitingSince) / 60) .. " min"
   end
   -- still at the machines: everything sent since this row last caught up, less everything that
-  -- came back since then (counting what was passed straight on to the next machine). It stays
-  -- counted while deliveries keep coming, however long the furnace queue is; once nothing has
-  -- arrived for CFG.quiet seconds (and the last send is over CFG.trip seconds old) the machines
-  -- are done and whatever didn't show up went to other uses.
+  -- came back since then. It stays counted however long it waits in the chest behind other
+  -- items; only if nothing at all has arrived for CFG.quiet seconds (and the last send is over
+  -- CFG.trip seconds old) is the rest written off, as a safety net.
   local inFlight = 0
   if (s.out or 0) > 0 then
-    local arrived = (have - s.base + (passedOn[e.name] or 0) - s.basePassed) / e.per
-    inFlight = math.max(0, s.out - math.max(0, arrived))
+    inFlight = math.max(0, s.out - (s.rises or 0) / e.per)
     local delivering = s.lastRise and now - s.lastRise < CFG.quiet
     -- forget it only once deliveries have started and then stopped: a long queue ahead of it
     -- (ores first) can take minutes before anything arrives, and that is not "done"
@@ -492,7 +492,7 @@ local function process(e, have, short, now)
   if moved <= 0 then return inFlightText or ("waiting: " .. e.how .. " chest full") end
   lastWork = "sent " .. commas(moved) .. " " .. displayName(e.from) .. " to " .. e.how
   if s.out == 0 then
-    s.base, s.basePassed, s.windowStart = have, passedOn[e.name] or 0, now
+    s.rises, s.windowStart = 0, now
     logEvent(lastWork .. " (" .. displayName(e.name) .. " " .. commas(have) .. " / " .. commas(e.keep) .. ")")
   end
   s.out, s.lastSend = s.out + moved, now
