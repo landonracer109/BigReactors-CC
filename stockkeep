@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.81"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.82"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -64,7 +64,8 @@ local CFG = {
   sendBatch     = 1728,      -- most of one item sent per look (27 stacks: a whole Ender Chest)
   flowCheck     = 5,         -- seconds between sends for smelt all / pulverize all
   trip          = 60,        -- seconds: a sent batch counts as still at the machines at least this long
-  quiet         = 15,        -- ... and after that until nothing has arrived for this many seconds
+  quiet         = 120,       -- ... and after that until nothing has arrived for this many seconds (long:
+                             -- rows share the machines, so one item can sit queued behind another a while)
   stuckAfter    = 600,       -- seconds: sent items that haven't come back by then = a problem
   backoff       = 1800,      -- seconds before a stuck or refused craft is asked for again
   startDelay    = 60,        -- seconds after start before anything is crafted or sent (AE loading)
@@ -464,7 +465,12 @@ local function process(e, have, short, now)
     -- forget it only once deliveries have started and then stopped: a long queue ahead of it
     -- (ores first) can take minutes before anything arrives, and that is not "done"
     local started = s.lastRise and s.lastRise >= s.windowStart
-    if inFlight <= 0 or (now - s.lastSend >= CFG.trip and started and not delivering) then s.out, inFlight = 0, 0 end
+    if inFlight <= 0 then
+      s.out, inFlight = 0, 0
+    elseif now - s.lastSend >= CFG.trip and started and not delivering then
+      logEvent(displayName(e.name) .. ": none back for " .. CFG.quiet .. " s, stopped counting " .. commas(math.ceil(inFlight * e.per)) .. " as at the machines")
+      s.out, inFlight = 0, 0
+    end
   end
   local inFlightText = inFlight > 0 and ("processing " .. commas(math.ceil(inFlight * e.per))) or nil
   if not e.from then return "no input: use " .. e.how .. " all, or re-add it" end
@@ -484,12 +490,15 @@ local function process(e, have, short, now)
   local dir = e.how == "smelt" and CFG.smeltChest or CFG.pulverizeChest
   local moved = tonumber(sendTo(fromId, n, dir)) or 0
   if moved <= 0 then return inFlightText or ("waiting: " .. e.how .. " chest full") end
-  if s.out == 0 then s.base, s.basePassed, s.windowStart = have, passedOn[e.name] or 0, now end
+  lastWork = "sent " .. commas(moved) .. " " .. displayName(e.from) .. " to " .. e.how
+  if s.out == 0 then
+    s.base, s.basePassed, s.windowStart = have, passedOn[e.name] or 0, now
+    logEvent(lastWork .. " (" .. displayName(e.name) .. " " .. commas(have) .. " / " .. commas(e.keep) .. ")")
+  end
   s.out, s.lastSend = s.out + moved, now
   s.waitingSince = s.waitingSince or now
   s.unanswered = s.unanswered + moved
   passedOn[e.from] = (passedOn[e.from] or 0) + moved
-  lastWork = "sent " .. commas(moved) .. " " .. displayName(e.from) .. " to " .. e.how
   return "processing " .. commas(math.ceil((inFlight + moved) * e.per))
 end
 
