@@ -3,7 +3,7 @@
 # (filled by a bucket turtle). One block per line: id:damage  how many  name. Copy to the stockkeep computer as stockkeep.goals
 4095:0 145345 Thickened glass (Extra Utils)
 1:0 69830 Stone (platform, sidewalks + facades)
-159:15 22837 Black stained clay (roads)
+159:15 22240 Black stained clay (roads)
 928:2 17076 Silver block (TE)
 49:0 13580 Obsidian
 928:1 13492 Tin block (TE)
@@ -22,11 +22,11 @@
 159:14 3351 Red stained clay
 57:0 3115 Block of diamond
 159:9 2739 Cyan stained clay
+159:4 2630 Yellow stained clay (street centre lines + facades)
 928:0 2602 Copper block (TE)
 18:0 2543 Oak leaves
 133:0 2189 Block of emerald
 45:0 2040 Bricks
-159:4 2033 Yellow stained clay (street centre lines + facades)
 2:0 2002 Grass
 152:0 1528 Block of redstone
 24:1 1389 Chiseled sandstone
