@@ -1,4 +1,5 @@
-# Skyline City, seed 49696 (Tallest tower 220), on a sea-level platform: NW corner x -864 z -441, SE corner x -604 z -188,
+# Skyline City, seed 49696 (Tallest tower 220), on a sea-level platform: city x -866..-606, z -466..-213 (box x -868..-604,
+# z -468..-188; depot strip z -212..-188 along the south edge),
 # platform at y 62, buildings from y 63 (Landmark shortened to fit)
 # one block per line: id:damage  how many  name. Copy to the stockkeep computer as stockkeep.goals
 4095:0 137666 Thickened Glass
