@@ -1,41 +1,40 @@
-# Skyline City, seed 49696 (Tallest tower 220), on a sea-level platform: city x -866..-606, z -466..-213 (box x -868..-604,
-# z -468..-188; depot strip z -212..-188 along the south edge),
-# platform at y 62, buildings from y 63 (Landmark shortened to fit)
-# one block per line: id:damage  how many  name. Copy to the stockkeep computer as stockkeep.goals
-4095:0 137666 Thickened Glass
-1:0 64476 Stone (sidewalks + platform under the lots)
-159:15 22591 Black Clay (roads)
-155:0 22462 Quartz Block
-49:0 13220 Obsidian
-928:6 11404 Electrum Block
-928:1 11088 Tin Block
-24:0 8812 Sandstone
-45:0 6469 Bricks
-928:2 6397 Silver Block
-98:0 6066 Stone Bricks
-42:0 6020 Iron Block
-928:0 5106 Copper Block
-2:0 4130 Grass
-928:7 3796 Invar Block
-159:0 3779 White Clay
-155:2 3681 Pillar Quartz
-89:0 3556 Glowstone
-18:0 3437 Oak Leaves
-101:0 3382 Iron Bars
-133:0 3082 Emerald Block
-24:1 3071 Chiseled Sandstone
-159:14 2796 Red Clay
-159:4 2767 Yellow Clay
-112:0 2649 Nether Brick
-159:9 2591 Cyan Clay
-159:1 2105 Orange Clay
-57:0 2021 Diamond Block
-928:3 1800 Lead Block
-22:0 1457 Lapis Block
-41:0 1445 Gold Block
-159:8 989 Light Gray Clay
-152:0 581 Redstone Block
-17:0 468 Oak Log
-1763:0 226 Yellorium Block
-2522:0 42 Magnum Torch
+# Skyline City, seed 49696 (Tallest tower 220, Landmark shortened to fit), from the turtle job export (export-all.js):
+# platform at y 62 over x -866..-606, z -466..-213, buildings from y 63. Every block the turtles place, except 128 park water
+# (filled by a bucket turtle). One block per line: id:damage  how many  name. Copy to the stockkeep computer as stockkeep.goals
+4095:0 145345 Thickened glass (Extra Utils)
+1:0 69830 Stone (platform, sidewalks + facades)
+159:15 22837 Black stained clay (roads)
+928:2 17076 Silver block (TE)
+49:0 13580 Obsidian
+928:1 13492 Tin block (TE)
+928:6 12852 Electrum block (TE)
+155:0 11881 Block of quartz
+24:0 8457 Sandstone
+42:0 6597 Block of iron
+112:0 6596 Nether brick
+928:3 5475 Lead block (TE)
+98:0 5315 Stone bricks
+928:7 5222 Invar block (TE)
+22:0 4913 Lapis lazuli block
+89:0 3748 Glowstone
+155:2 3633 Pillar quartz
+101:0 3403 Iron bars
+159:14 3351 Red stained clay
+57:0 3115 Block of diamond
+159:9 2739 Cyan stained clay
+928:0 2602 Copper block (TE)
+18:0 2543 Oak leaves
+133:0 2189 Block of emerald
+45:0 2040 Bricks
+159:4 2033 Yellow stained clay (street centre lines + facades)
+2:0 2002 Grass
+152:0 1528 Block of redstone
+24:1 1389 Chiseled sandstone
+41:0 608 Block of gold
+1763:0 565 Yellorium block (Big Reactors)
+159:8 437 Light gray stained clay
+17:0 351 Oak log
+159:0 300 White stained clay (highway lane lines)
+159:1 244 Orange stained clay
+2522:0 40 Magnum Torch (Extra Utils)
 173:0 900 Coal Block (turtle fuel)
