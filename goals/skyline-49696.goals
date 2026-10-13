@@ -1,0 +1,39 @@
+# Skyline City, seed 49696 (Tallest tower 220, Landmark shortened to fit with ground at y 64)
+# one block per line: id:damage  how many  name. Copy to the stockkeep computer as stockkeep.goals
+4095:0 137666 Thickened Glass
+1:0 28432 Smooth Stone
+159:15 22591 Black Clay (roads)
+155:0 22462 Quartz Block
+49:0 13220 Obsidian
+928:6 11404 Electrum Block
+928:1 11088 Tin Block
+24:0 8812 Sandstone
+45:0 6469 Bricks
+928:2 6397 Silver Block
+98:0 6066 Stone Bricks
+42:0 6020 Iron Block
+928:0 5106 Copper Block
+2:0 4130 Grass
+928:7 3796 Invar Block
+159:0 3779 White Clay
+155:2 3681 Pillar Quartz
+89:0 3556 Glowstone
+18:0 3437 Oak Leaves
+101:0 3382 Iron Bars
+133:0 3082 Emerald Block
+24:1 3071 Chiseled Sandstone
+159:14 2796 Red Clay
+159:4 2767 Yellow Clay
+112:0 2649 Nether Brick
+159:9 2591 Cyan Clay
+159:1 2105 Orange Clay
+57:0 2021 Diamond Block
+928:3 1800 Lead Block
+22:0 1457 Lapis Block
+41:0 1445 Gold Block
+159:8 989 Light Gray Clay
+152:0 581 Redstone Block
+17:0 468 Oak Log
+1763:0 226 Yellorium Block
+2522:0 42 Magnum Torch
+173:0 900 Coal Block (turtle fuel)

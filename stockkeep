@@ -34,7 +34,7 @@
 -- Silicon), Graphite from Coal, ingots from pulverized dust, dust from ore (2 each). Never smelt
 -- raw yellorite: in this pack it turns into Atomic Science uranium.
 
-local VERSION = "v1.83"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
+local VERSION = "v1.90"   -- shown on screen: +0.01 per fix, next tenth for a new feature, next whole number for a big rework
 
 local CFG = {
   check         = 30,        -- seconds between checks
@@ -621,6 +621,25 @@ local trendHave, lastTrendScan = {}, -math.huge
 -- is logged, since AE1 can stall a craft for good when an ingredient is at 0 for a moment
 local inAE = nil    -- shown name -> amount
 local gone = {}     -- what ran out (and was logged), to log when it's back
+-- City page: a shopping list for a big build, from stockkeep.goals (one "id:dmg need name" per line,
+-- e.g. "159:15 22591 Black stained clay"), with how much of each AE has, from the same listing
+local GOALS_FILE = "stockkeep.goals"
+local goals = nil    -- { { id, dmg, need, name, have } } (nil = no goals file)
+local function loadGoals()
+  goals = nil
+  local h = fs.open(GOALS_FILE, "r")
+  if not h then return end
+  local list = {}
+  while true do
+    local line = h.readLine()
+    if not line then break end
+    local id, dmg, need, name = line:match("^%s*(%d+):(%d+)%s+(%d+)%s+(.-)%s*$")
+    if id then list[#list + 1] = { id = tonumber(id), dmg = tonumber(dmg), need = tonumber(need), name = name } end
+  end
+  h.close()
+  if #list > 0 then goals = list end
+end
+loadGoals()
 local function trendWanted(shown)
   local low = shown:lower()
   for _, w in ipairs(CFG.trendAlso) do if low == w:lower() then return true end end
@@ -636,7 +655,12 @@ local function scanTrends(now)
   if type(all) ~= "table" then return end
   local have = {}
   local nowIn = {}
+  local byId = {}
   for _, s in pairs(all) do
+    if type(s) == "table" and s.id then
+      local k = s.id .. ":" .. (s.dmg or 0)
+      byId[k] = (byId[k] or 0) + (tonumber(s.qty) or 0)
+    end
     if type(s) == "table" and s.name and (tonumber(s.maxdmg) or 0) == 0 then
       local shown = displayName(s.name)
       nowIn[shown] = (nowIn[shown] or 0) + (tonumber(s.qty) or 0)
@@ -646,6 +670,7 @@ local function scanTrends(now)
   -- something that's run out drops off AE's listing: it reads 0 rather than vanishing
   for shown in pairs(trendHave) do have[shown] = have[shown] or 0 end
   trendHave = have
+  if goals then for _, g in ipairs(goals) do g.have = byId[g.id .. ":" .. g.dmg] or 0 end end
   if inAE then
     local out, back = {}, {}
     -- only real stock (a stack or more) running out: ores and junk passing through hit 0 all the time
@@ -1214,6 +1239,14 @@ local function monitorRows(mon)
     table.sort(list, function(a, b) return a.name < b.name end)
     return list
   end
+  if mode == "city" then
+    -- furthest behind first
+    local list = {}
+    for _, g in ipairs(goals or {}) do list[#list + 1] = g end
+    local function frac(g) return math.min(1, (g.have or 0) / math.max(1, g.need)) end
+    table.sort(list, function(a, b) if frac(a) ~= frac(b) then return frac(a) < frac(b) end return a.need > b.need end)
+    return list
+  end
   if mode ~= "needs" then return LIST end
   local list, over = {}, {}
   for _, e in ipairs(LIST) do
@@ -1309,15 +1342,16 @@ local function drawMonitor(m, name, place)
   local list = monitorRows(name)
   local needsMode = ui.pages["mode:" .. name] == "needs"
   local trendsMode = ui.pages["mode:" .. name] == "trends"
+  local cityMode = ui.pages["mode:" .. name] == "city"
   local pages = math.max(1, math.ceil(#list / rows))
-  local page = math.max(1, math.min(ui.pages[name] or ((needsMode or trendsMode) and 1 or place), pages))
+  local page = math.max(1, math.min(ui.pages[name] or ((needsMode or trendsMode or cityMode) and 1 or place), pages))
   ui.shown[name] = page
   button(m, 31, 1, " < ", colours.grey, "prev")
   m.setCursorPos(35, 1); m.setBackgroundColour(colours.blue); m.setTextColour(colours.white); m.write(page .. "/" .. pages)
   button(m, 40, 1, " > ", colours.grey, "next")
   -- All / Needs: this monitor lists everything, or only what isn't satisfied
-  button(m, 45, 1, trendsMode and " Trends " or needsMode and " Needs " or " All ",
-         trendsMode and colours.cyan or needsMode and colours.orange or colours.grey, "mode")
+  button(m, 45, 1, cityMode and " City " or trendsMode and " Trends " or needsMode and " Needs " or " All ",
+         cityMode and colours.purple or trendsMode and colours.cyan or needsMode and colours.orange or colours.grey, "mode")
   m.setBackgroundColour(colours.black)
   if aeStuck then   -- one stuck AE job stops all of AE's crafting: say so loudly
     band(m, 2, w, colours.red)
@@ -1326,9 +1360,47 @@ local function drawMonitor(m, name, place)
     m.setBackgroundColour(colours.black)
   else
     local note = trendsMode and "Ingots, alloys and quartz in AE, and how fast each is changing over the last hour." or ui.message
+    if cityMode then
+      local need, have, done = 0, 0, 0
+      for _, g in ipairs(goals or {}) do
+        need = need + g.need; have = have + math.min(g.have or 0, g.need)
+        if (g.have or 0) >= g.need then done = done + 1 end
+      end
+      note = string.format("City materials: %s of %s blocks (%d%%), %d of %d kinds complete.",
+        compact(have), compact(need), math.floor(have * 100 / math.max(1, need)), done, #(goals or {}))
+    end
     m.setCursorPos(2, 2); m.setTextColour(colours.lightGrey); m.write(note:sub(1, w - 2))
   end
   local nameW = math.max(10, w - 63)
+  if cityMode then
+    -- City: the shopping list, furthest behind first, with a bar for each
+    nameW = math.max(10, math.min(34, w - 46))
+    local cHave, cNeed, cPct, cBar = nameW + 3, nameW + 13, nameW + 23, nameW + 29
+    local barW = math.max(4, w - cBar - 1)
+    band(m, 3, w, colours.grey)
+    m.setTextColour(colours.white)
+    m.setCursorPos(2, 3); m.write("BLOCK"); m.setCursorPos(cHave, 3); m.write("HAVE"); m.setCursorPos(cNeed, 3); m.write("NEED")
+    m.setCursorPos(cPct, 3); m.write("%")
+    m.setBackgroundColour(colours.black)
+    local first = (page - 1) * rows + 1
+    for i = first, math.min(#list, first + rows - 1) do
+      local g, y = list[i], 4 + i - first
+      local have = g.have
+      local f = have and math.min(1, have / math.max(1, g.need)) or 0
+      local col = not have and colours.grey or f >= 1 and colours.lime or f >= .5 and colours.yellow or colours.red
+      m.setCursorPos(2, y); m.setTextColour(colours.white)
+      m.write(#g.name > nameW and (g.name:sub(1, nameW - 1) .. ".") or g.name)
+      m.setCursorPos(cHave, y); m.setTextColour(colours.lightBlue); m.write(have and compact(have) or "?")
+      m.setCursorPos(cNeed, y); m.setTextColour(colours.lightGrey); m.write(compact(g.need))
+      m.setCursorPos(cPct, y); m.setTextColour(col); m.write(have and (math.floor(f * 100) .. "%") or "...")
+      local filled = math.floor(f * barW + 0.5)
+      m.setCursorPos(cBar, y)
+      m.setBackgroundColour(col); m.write(string.rep(" ", filled))
+      m.setBackgroundColour(colours.grey); m.write(string.rep(" ", barW - filled))
+      m.setBackgroundColour(colours.black)
+    end
+    return
+  end
   if trendsMode then
     -- Trends: what's in AE and how fast it's changing, from the last hour of counts
     nameW = math.max(10, w - 48)   -- (fewer columns here: room for whole names)
@@ -1496,7 +1568,7 @@ local function touch(mon, x, y)
         ui.message = displayName(e.name) .. (displayName(e.name) ~= e.name and ("  (internal name: " .. e.name .. ")") or "") .. (e.from and ("  from " .. displayName(e.from) .. ((e.per or 1) > 1 and (", " .. e.per .. " each") or "")) or "")
       elseif hit.action == "mode" then
         local cur = ui.pages["mode:" .. mon]
-        ui.pages["mode:" .. mon] = (cur == nil and "needs") or (cur == "needs" and "trends") or nil
+        ui.pages["mode:" .. mon] = (cur == nil and "needs") or (cur == "needs" and "trends") or (cur == "trends" and goals and "city") or nil
         ui.pages[mon] = 1; savePages()
       elseif hit.action == "prev" or hit.action == "next" then
         local pages = math.max(1, math.ceil(#monitorRows(mon) / (ui.rows[mon] or 1)))
