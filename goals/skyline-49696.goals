@@ -1,7 +1,8 @@
-# Skyline City, seed 49696 (Tallest tower 220, Landmark shortened to fit with ground at y 64)
+# Skyline City, seed 49696 (Tallest tower 220), on a sea-level platform: NW corner x -864 z -441, SE corner x -604 z -188,
+# platform at y 62, buildings from y 63 (Landmark shortened to fit)
 # one block per line: id:damage  how many  name. Copy to the stockkeep computer as stockkeep.goals
 4095:0 137666 Thickened Glass
-1:0 28432 Smooth Stone
+1:0 64476 Stone (sidewalks + platform under the lots)
 159:15 22591 Black Clay (roads)
 155:0 22462 Quartz Block
 49:0 13220 Obsidian
