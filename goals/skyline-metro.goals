@@ -1,5 +1,5 @@
 # Skyline Metro (Mystcraft age, dim 92): every block the turtles place, all five zones.
-# 884,394 blocks in 2717 jobs, from the turtle job export. One block per line: id:damage  how many  name.
+# 900,866 blocks in 3061 jobs, from the turtle job export. One block per line: id:damage  how many  name.
 # Copy to the stockkeep computer as stockkeep.goals. Per-zone counts and the hand-placed parts are at the bottom (comments).
 159:15 181364 Black stained clay
 3:0 160023 Dirt
@@ -10,8 +10,9 @@
 159:0 41622 White stained clay
 24:0 25761 Sandstone
 159:1 22260 Orange stained clay
-20:0 15790 Glass
+4095:0 15790 Thickened glass (Extra Utils)
 159:8 14850 Light gray stained clay
+101:0 14810 Iron bars
 159:7 13457 Gray stained clay
 155:0 6701 Block of quartz
 159:3 6491 Light blue stained clay
@@ -24,14 +25,14 @@
 159:5 4923 Lime stained clay
 159:11 4599 Blue stained clay
 159:12 3397 Brown stained clay
+89:0 3054 Glowstone
 2:0 2431 Grass block
 159:2 1848 Magenta stained clay
-101:0 1392 Iron bars
 44:0 892 Stone slab
 2522:0 89 Magnum Torch (Extra Utils)
 #
 # By zone (build order):
-# Midtown & Stadium (east): 181,996 blocks
+# Midtown & Stadium (east): 185,580 blocks
 #   98:0 45691 Stone bricks
 #   159:15 34491 Black stained clay
 #   1:0 25938 Smooth stone
@@ -40,8 +41,9 @@
 #   155:0 6127 Block of quartz
 #   45:0 5807 Bricks
 #   24:0 5562 Sandstone
-#   20:0 5122 Glass
+#   4095:0 5122 Thickened glass (Extra Utils)
 #   159:1 4741 Orange stained clay
+#   101:0 3748 Iron bars
 #   18:0 2668 Oak leaves
 #   159:8 2434 Light gray stained clay
 #   159:14 2193 Red stained clay
@@ -49,12 +51,12 @@
 #   159:9 1864 Cyan stained clay
 #   159:4 1027 Yellow stained clay
 #   172:0 900 Hardened clay
-#   101:0 852 Iron bars
+#   89:0 688 Glowstone
 #   2:0 401 Grass block
 #   17:0 200 Oak wood
 #   44:0 100 Stone slab
 #   2522:0 21 Magnum Torch (Extra Utils)
-# Harbor & I-35 North (north): 203,469 blocks
+# Harbor & I-35 North (north): 207,897 blocks
 #   159:15 50148 Black stained clay
 #   1:0 30601 Smooth stone
 #   3:0 26435 Dirt
@@ -63,12 +65,14 @@
 #   98:0 14600 Stone bricks
 #   159:7 13291 Gray stained clay
 #   159:1 9610 Orange stained clay
-#   20:0 4595 Glass
+#   4095:0 4595 Thickened glass (Extra Utils)
+#   101:0 3554 Iron bars
 #   159:4 3408 Yellow stained clay
 #   159:3 2856 Light blue stained clay
 #   18:0 2382 Oak leaves
 #   159:2 1848 Magenta stained clay
 #   159:5 1656 Lime stained clay
+#   89:0 874 Glowstone
 #   66:0 647 Rail
 #   159:14 618 Red stained clay
 #   2:0 321 Grass block
@@ -76,7 +80,7 @@
 #   17:0 184 Oak wood
 #   159:8 72 Light gray stained clay
 #   2522:0 17 Magnum Torch (Extra Utils)
-# Oakridge & I-35 South (south): 198,229 blocks
+# Oakridge & I-35 South (south): 201,056 blocks
 #   3:0 57391 Dirt
 #   18:0 27607 Oak leaves
 #   159:15 22962 Black stained clay
@@ -86,9 +90,10 @@
 #   45:0 9491 Bricks
 #   159:0 6514 White stained clay
 #   159:8 6240 Light gray stained clay
-#   20:0 3142 Glass
+#   4095:0 3142 Thickened glass (Extra Utils)
 #   159:11 2606 Blue stained clay
 #   172:0 2513 Hardened clay
+#   101:0 2474 Iron bars
 #   17:0 2364 Oak wood
 #   159:9 2018 Cyan stained clay
 #   159:1 2013 Orange stained clay
@@ -99,11 +104,11 @@
 #   159:14 1325 Red stained clay
 #   159:4 1257 Yellow stained clay
 #   2:0 894 Grass block
+#   89:0 553 Glowstone
 #   155:0 322 Block of quartz
-#   101:0 200 Iron bars
 #   44:0 188 Stone slab
 #   2522:0 15 Magnum Torch (Extra Utils)
-# Cedar Hills, I-20 West & Bay Parkway (west): 191,894 blocks
+# Cedar Hills, I-20 West & Bay Parkway (west): 194,489 blocks
 #   3:0 52194 Dirt
 #   159:15 25687 Black stained clay
 #   18:0 25440 Oak leaves
@@ -114,7 +119,8 @@
 #   159:0 6786 White stained clay
 #   159:8 6104 Light gray stained clay
 #   159:1 4089 Orange stained clay
-#   20:0 2931 Glass
+#   4095:0 2931 Thickened glass (Extra Utils)
+#   101:0 2430 Iron bars
 #   17:0 2192 Oak wood
 #   172:0 2061 Hardened clay
 #   159:11 1993 Blue stained clay
@@ -125,18 +131,20 @@
 #   159:5 1531 Lime stained clay
 #   66:0 1210 Rail
 #   2:0 815 Grass block
-#   101:0 340 Iron bars
+#   89:0 505 Glowstone
 #   155:0 252 Block of quartz
 #   44:0 188 Stone slab
 #   159:7 166 Gray stained clay
 #   159:4 128 Yellow stained clay
 #   2522:0 16 Magnum Torch (Extra Utils)
-# I-410 Loop, cloverleafs & bay viaducts (loop): 108,806 blocks
+# I-410 Loop, cloverleafs & bay viaducts (loop): 111,844 blocks
 #   98:0 54435 Stone bricks
 #   159:15 48076 Black stained clay
 #   159:0 3325 White stained clay
+#   101:0 2604 Iron bars
 #   159:1 1807 Orange stained clay
 #   66:0 718 Rail
+#   89:0 434 Glowstone
 #   159:4 213 Yellow stained clay
 #   44:0 212 Stone slab
 #   2522:0 20 Magnum Torch (Extra Utils)
