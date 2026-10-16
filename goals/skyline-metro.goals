@@ -16,7 +16,7 @@
 159:7 13457 Gray stained clay
 155:0 6701 Block of quartz
 159:3 6491 Light blue stained clay
-66:0 6088 Rail
+454:24 6088 Reinforced track (Railcraft)
 159:4 6033 Yellow stained clay
 159:14 5874 Red stained clay
 159:9 5652 Cyan stained clay
@@ -47,7 +47,7 @@
 #   18:0 2668 Oak leaves
 #   159:8 2434 Light gray stained clay
 #   159:14 2193 Red stained clay
-#   66:0 2187 Rail
+#   454:24 2187 Reinforced track (Railcraft)
 #   159:9 1864 Cyan stained clay
 #   159:4 1027 Yellow stained clay
 #   172:0 900 Hardened clay
@@ -73,7 +73,7 @@
 #   159:2 1848 Magenta stained clay
 #   159:5 1656 Lime stained clay
 #   89:0 874 Glowstone
-#   66:0 647 Rail
+#   454:24 647 Reinforced track (Railcraft)
 #   159:14 618 Red stained clay
 #   2:0 321 Grass block
 #   44:0 204 Stone slab
@@ -100,7 +100,7 @@
 #   159:3 1999 Light blue stained clay
 #   159:5 1736 Lime stained clay
 #   159:12 1713 Brown stained clay
-#   66:0 1326 Rail
+#   454:24 1326 Reinforced track (Railcraft)
 #   159:14 1325 Red stained clay
 #   159:4 1257 Yellow stained clay
 #   2:0 894 Grass block
@@ -129,7 +129,7 @@
 #   159:12 1684 Brown stained clay
 #   159:3 1636 Light blue stained clay
 #   159:5 1531 Lime stained clay
-#   66:0 1210 Rail
+#   454:24 1210 Reinforced track (Railcraft)
 #   2:0 815 Grass block
 #   89:0 505 Glowstone
 #   155:0 252 Block of quartz
@@ -143,7 +143,7 @@
 #   159:0 3325 White stained clay
 #   101:0 2604 Iron bars
 #   159:1 1807 Orange stained clay
-#   66:0 718 Rail
+#   454:24 718 Reinforced track (Railcraft)
 #   89:0 434 Glowstone
 #   159:4 213 Yellow stained clay
 #   44:0 212 Stone slab
