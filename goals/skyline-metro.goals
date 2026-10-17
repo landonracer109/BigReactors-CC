@@ -1,47 +1,47 @@
-# Skyline Metro (Mystcraft age, dim 92): every block the turtles place, all five zones.
-# 902,459 blocks in 3090 jobs, from the turtle job export. One block per line: id:damage  how many  name.
+# Skyline Metro (Mystcraft age, dim 92): every block the turtles still place (built already: east).
+# 716,741 blocks in 3090 jobs, from the turtle job export. One block per line: id:damage  how many  name.
 # Copy to the stockkeep computer as stockkeep.goals. Per-zone counts and the hand-placed parts are at the bottom (comments).
-159:15 181364 Black stained clay
-3:0 160023 Dirt
-98:0 150246 Stone bricks
-1:0 87221 Smooth stone
-18:0 58097 Oak leaves
-45:0 47587 Bricks
-159:0 41622 White stained clay
-24:0 25761 Sandstone
-159:1 22260 Orange stained clay
-4095:0 15790 Thickened glass (Extra Utils)
-159:8 14850 Light gray stained clay
-101:0 14791 Iron bars
+159:15 146681 Black stained clay
+3:0 136020 Dirt
+98:0 105084 Stone bricks
+1:0 60959 Smooth stone
+18:0 55429 Oak leaves
+45:0 41780 Bricks
+159:0 31912 White stained clay
+24:0 20199 Sandstone
+159:1 17519 Orange stained clay
 159:7 13457 Gray stained clay
-155:0 6701 Block of quartz
+159:8 12416 Light gray stained clay
+101:0 11054 Iron bars
+4095:0 10668 Thickened glass (Extra Utils)
 159:3 6491 Light blue stained clay
-454:24 6088 Reinforced track (Railcraft)
-159:4 6033 Yellow stained clay
-159:14 5868 Red stained clay
-159:9 5652 Cyan stained clay
-172:0 5474 Hardened clay
-17:0 4940 Oak wood
+159:4 5006 Yellow stained clay
 159:5 4923 Lime stained clay
+17:0 4740 Oak wood
 159:11 4599 Blue stained clay
+172:0 4574 Hardened clay
+454:24 3901 Reinforced track (Railcraft)
+159:9 3788 Cyan stained clay
+159:14 3675 Red stained clay
 159:12 3397 Brown stained clay
-89:0 3052 Glowstone
-2:0 2431 Grass block
+89:0 2365 Glowstone
+2:0 2030 Grass block
 159:2 1848 Magenta stained clay
-44:0 892 Stone slab
-765:4 798 Advanced Monitor
-2522:0 89 Magnum Torch (Extra Utils)
-765:0 38 Disk Drive
-764:16384 38 Advanced Computer
-5883:0 38 Floppy Disk
+44:0 792 Stone slab
+765:4 693 Advanced Monitor
+155:0 574 Block of quartz
+2522:0 68 Magnum Torch (Extra Utils)
+765:0 33 Disk Drive
+764:16384 33 Advanced Computer
+5883:0 33 Floppy Disk
 #
 # By zone (build order):
-# Midtown & Stadium (east): 185,785 blocks
-#   98:0 45788 Stone bricks
-#   159:15 34491 Black stained clay
-#   1:0 25938 Smooth stone
+# Midtown & Stadium (east): 185,886 blocks
+#   98:0 46188 Stone bricks
+#   159:15 34365 Black stained clay
+#   1:0 25803 Smooth stone
 #   3:0 24003 Dirt
-#   159:0 9667 White stained clay
+#   159:0 9629 White stained clay
 #   155:0 6127 Block of quartz
 #   45:0 5807 Bricks
 #   24:0 5562 Sandstone
@@ -64,13 +64,13 @@
 #   765:0 5 Disk Drive
 #   764:16384 5 Advanced Computer
 #   5883:0 5 Floppy Disk
-# Harbor & I-35 North (north): 208,023 blocks
-#   159:15 50148 Black stained clay
-#   1:0 30601 Smooth stone
+# Harbor & I-35 North (north): 208,117 blocks
+#   159:15 50103 Black stained clay
+#   1:0 30565 Smooth stone
 #   3:0 26435 Dirt
 #   45:0 24646 Bricks
-#   159:0 15330 White stained clay
-#   98:0 14660 Stone bricks
+#   159:0 15317 White stained clay
+#   98:0 14848 Stone bricks
 #   159:7 13291 Gray stained clay
 #   159:1 9610 Orange stained clay
 #   4095:0 4595 Thickened glass (Extra Utils)
@@ -92,15 +92,15 @@
 #   765:0 3 Disk Drive
 #   764:16384 3 Advanced Computer
 #   5883:0 3 Floppy Disk
-# Oakridge & I-35 South (south): 201,185 blocks
+# Oakridge & I-35 South (south): 201,120 blocks
 #   3:0 57391 Dirt
 #   18:0 27607 Oak leaves
-#   159:15 22962 Black stained clay
-#   98:0 16506 Stone bricks
-#   1:0 16391 Smooth stone
+#   159:15 22917 Black stained clay
+#   98:0 16652 Stone bricks
+#   1:0 16236 Smooth stone
 #   24:0 9555 Sandstone
 #   45:0 9491 Bricks
-#   159:0 6514 White stained clay
+#   159:0 6503 White stained clay
 #   159:8 6240 Light gray stained clay
 #   4095:0 3142 Thickened glass (Extra Utils)
 #   159:11 2606 Blue stained clay
@@ -124,15 +124,15 @@
 #   765:0 3 Disk Drive
 #   764:16384 3 Advanced Computer
 #   5883:0 3 Floppy Disk
-# Cedar Hills, I-20 West & Bay Parkway (west): 194,618 blocks
+# Cedar Hills, I-20 West & Bay Parkway (west): 194,587 blocks
 #   3:0 52194 Dirt
-#   159:15 25687 Black stained clay
+#   159:15 25647 Black stained clay
 #   18:0 25440 Oak leaves
-#   98:0 18422 Stone bricks
-#   1:0 14291 Smooth stone
+#   98:0 18576 Stone bricks
+#   1:0 14158 Smooth stone
 #   24:0 10644 Sandstone
 #   45:0 7643 Bricks
-#   159:0 6786 White stained clay
+#   159:0 6774 White stained clay
 #   159:8 6104 Light gray stained clay
 #   159:1 4089 Orange stained clay
 #   4095:0 2931 Thickened glass (Extra Utils)
@@ -157,10 +157,10 @@
 #   765:0 3 Disk Drive
 #   764:16384 3 Advanced Computer
 #   5883:0 3 Floppy Disk
-# I-410 Loop, cloverleafs & bay viaducts (loop): 112,848 blocks
-#   98:0 54870 Stone bricks
-#   159:15 48076 Black stained clay
-#   159:0 3325 White stained clay
+# I-410 Loop, cloverleafs & bay viaducts (loop): 112,917 blocks
+#   98:0 55008 Stone bricks
+#   159:15 48014 Black stained clay
+#   159:0 3318 White stained clay
 #   101:0 2598 Iron bars
 #   159:1 1807 Orange stained clay
 #   454:24 718 Reinforced track (Railcraft)
